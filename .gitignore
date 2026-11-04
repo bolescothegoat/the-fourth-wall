@@ -1,0 +1,8 @@
+build/
+dist/
+_libs/
+*.log
+*.dll
+*.zip
+# not redistributable here; see BUILDING.md
+src/SKSEMenuFramework.h
