@@ -3,6 +3,7 @@
 An SKSE plugin for Skyrim SE / AE that makes player and NPC eyes look into the camera. Eyes only: the head keeps whatever pose the game or animation gives it.
 
 - Nexus page: https://www.nexusmods.com/skyrimspecialedition/mods/197923
+- Source: https://github.com/bolescothegoat/the-fourth-wall
 - License: GNU GPL v3 or later (see `LICENSE`)
 - Build instructions: `BUILDING.md`
 - Development timeline: `DEVELOPMENT_HISTORY.md`
