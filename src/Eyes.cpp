@@ -53,6 +53,7 @@ namespace Eyes
 
 		struct State
 		{
+			float             faceHold{ 0.0f };  // seconds left of the rest after a crossed-eyes FaceLab face ended
 			float             yaw{ 0 };    // normalised -1..1 (smoothed)
 			float             pitch{ 0 };  // normalised -1..1 (smoothed)
 			float             w[4]{};      // last values we wrote (down, left, right, up)
@@ -75,9 +76,17 @@ namespace Eyes
 			bool              idleSource{ false };  // this actor is driven by the "player idle" rule, not by a scene
 			float             leaveT{ -1.0f };      // >= 0: no longer a target, fading back to the engine's eyes
 			int               slot{ -1 };  // entry in the hook table
+			// FaceLab gaze path
+			float             gYaw{ 0.0f }, gPitch{ 0.0f };  // smoothed camera angles in degrees (+ yaw = camera to her right, + pitch = above)
+			float             gDist{ -1.0f };                 // smoothed camera distance in game units
+			float             gBlend{ 1.0f };                 // 1 = our gaze, 0 = handed back to the engine
+			bool              gazeSent{ false };
+			int               modeLogged{ -1 };
 			RE::BSFaceGenAnimationData* fgPtr{ nullptr };
 			Clock::time_point lastLog{};
 		};
+
+		void ClearFaceLabGaze(RE::FormID a_id, State& a_st, float a_fade);  // defined with the FaceLab gaze path, below
 
 		OStimApi::IThreadInterface*                       g_api{ nullptr };
 		std::map<std::uint32_t, std::vector<ActorEntry>>  g_threads;  // main thread only
@@ -160,6 +169,10 @@ namespace Eyes
 			std::atomic<float>                       fluGap{ 0.03f };
 			int                                      fluSeen{ 0 };   // hook thread only
 			float                                    fluT{ -1.0f };  // hook thread only; <0 = idle
+			// blink watch (dev aid): is one eyelid shut while the other is not? (hook thread only, except formId)
+			std::atomic<std::uint32_t>               formId{ 0 };
+			bool                                     asymOn{ false };
+			float                                    asymT{ 0.0f }, asymMaxL{ 0.0f }, asymMaxR{ 0.0f };
 		};
 		std::atomic<float> g_fadeOut{ 0.5f };  // seconds to hand the eyes back to the engine
 		std::atomic<float> g_fadeIn{ 1.2f };   // seconds to take them back (eased)
@@ -167,6 +180,10 @@ namespace Eyes
 		HookSlot      g_hookSlots[kHookSlots];
 		std::atomic<std::uint64_t> g_hookCalls{ 0 };
 		std::atomic<std::uint64_t> g_hookWrites{ 0 };
+		// Dev aid for the 'one eye blinks rapidly' report: logs when the final buffer has one eyelid shut and the other not, and every flutter. Switch off (false) before release.
+		constexpr bool             kBlinkWatch = true;
+		std::atomic<std::uint64_t> g_asymEpisodes{ 0 }, g_asymFrames{ 0 }, g_flutterPlays{ 0 };
+		std::atomic<int>           g_blinkWatchLines{ 0 };  // detail lines are capped per session
 		bool (*g_origKeyframes)(RE::BSFaceGenAnimationData*, float, bool){ nullptr };
 		bool g_hooked{ false };
 
@@ -291,6 +308,33 @@ namespace Eyes
 							s.fluT = -1.0f;
 						}
 					}
+					// ---- blink watch: after everything of ours has been written, is one eyelid shut and the other not? ----
+					if (kBlinkWatch && fin.values && fin.count > kBlinkR) {
+						const float bL = fin.values[kBlinkL], bR = fin.values[kBlinkR];
+						if (std::fabs(bL - bR) > 0.30f) {
+							g_asymFrames.fetch_add(1, std::memory_order_relaxed);
+							if (!s.asymOn) {
+								s.asymOn = true;
+								s.asymT = 0.0f;
+								s.asymMaxL = bL;
+								s.asymMaxR = bR;
+								if (g_blinkWatchLines.fetch_add(1) < 60) {
+									logger::info("blink watch: one eye shut, the other not - slot {} actor {:08X}: BlinkL {:.2f} BlinkR {:.2f}; flutter {}; gaze blend {:.2f}; look slots {:.2f} {:.2f} {:.2f} {:.2f}",
+										static_cast<int>(&s - g_hookSlots), s.formId.load(), bL, bR, s.fluT >= 0.0f ? "PLAYING" : "idle", cur, fin.values[kSlots[0]], fin.values[kSlots[1]], fin.values[kSlots[2]],
+										fin.values[kSlots[3]]);
+								}
+							}
+							s.asymT += dt;
+							s.asymMaxL = std::max(s.asymMaxL, bL);
+							s.asymMaxR = std::max(s.asymMaxR, bR);
+						} else if (s.asymOn) {
+							s.asymOn = false;
+							g_asymEpisodes.fetch_add(1, std::memory_order_relaxed);
+							if (g_blinkWatchLines.fetch_add(1) < 60) {
+								logger::info("blink watch: ...ended after {:.2f} s (slot {}, highest BlinkL {:.2f}, BlinkR {:.2f})", s.asymT, static_cast<int>(&s - g_hookSlots), s.asymMaxL, s.asymMaxR);
+							}
+						}
+					}
 					break;
 				}
 			}
@@ -335,8 +379,22 @@ namespace Eyes
 		// ID 26999, +0x13). Its replacement edits the face buffers and then tail-jumps to the original callee, which turns the buffers
 		// into morphs. That runs AFTER KeyframesUpdate, so PPA's face preset (blowjobs) wiped our eye values. We detour the original
 		// callee (the address PPA saved) and re-apply the four look slots right before the morphs are built, after PPA's edit.
-		constexpr std::uintptr_t kPpaSavedCalleeRva = 0x22AA08;  // PPA 0.0.37 .data: original callee pointer
-		constexpr std::uintptr_t kPpaHookFnRva = 0x11E1D0;       // PPA 0.0.37: its replacement function
+		// Known PPA builds: its replacement function (RVA) and the .data slot where it keeps the original callee it tail-jumps to (RVA).
+		// 0.0.39 was found by scanning for the one function with 0.0.37's prologue that ends in `jmp [rip+x]` into .data; its installer stores the original call target
+		// in that slot. checkJmp: also require that function's final `jmp [slot]` to point at the slot (consistency of the two numbers).
+		struct PpaBuild
+		{
+			const char*   name;
+			std::uintptr_t hookFnRva;
+			std::uintptr_t slotRva;
+			bool          checkJmp;
+		};
+		constexpr PpaBuild kPpaBuilds[] = {
+			// 0.0.39 (hook fn 0x13EA60, slot 0x252078, checkJmp) is DISABLED: found by static analysis only, never verified in a scene, and on 2026-11-06 PPA 0.0.39 lost its
+			// bone / sound output while this slot was patched (fine again with The Fourth Wall disabled). Do not re-enable without a live check.
+			{ "0.0.37", 0x11E1D0, 0x22AA08, false },
+		};
+		std::uintptr_t           g_ppaSlotRva{ 0 };
 		constexpr std::size_t    kFaceNodeAnimDataOffset = 0x150;  // BSFaceGenNiNode::animationData (SE/AE)
 		std::uintptr_t (*g_origMorphStep)(void*, bool){ nullptr };
 		bool                       g_lateHooked{ false };
@@ -399,14 +457,48 @@ namespace Eyes
 				return;
 			}
 			const auto  base = reinterpret_cast<std::uintptr_t>(ppa);
-			const auto* fn = reinterpret_cast<const std::uint8_t*>(base + kPpaHookFnRva);
 			static const std::uint8_t kPrologue[10] = { 0x48, 0x89, 0x5C, 0x24, 0x10, 0x48, 0x89, 0x6C, 0x24, 0x18 };
-			if (std::memcmp(fn, kPrologue, sizeof(kPrologue)) != 0) {
-				logger::warn("late pass: PPA is a different build than 0.0.37 (its hook function was not found at the expected place) - not hooking");
+			const auto* dos = reinterpret_cast<const IMAGE_DOS_HEADER*>(base);
+			const auto* nt = reinterpret_cast<const IMAGE_NT_HEADERS64*>(base + static_cast<std::uintptr_t>(dos->e_lfanew));
+			const std::uintptr_t imgSize = nt->OptionalHeader.SizeOfImage;
+			const PpaBuild*      build = nullptr;
+			for (const auto& c : kPpaBuilds) {
+				if (c.hookFnRva + 0x100 > imgSize || c.slotRva + sizeof(std::uintptr_t) > imgSize) {
+					continue;
+				}
+				const auto* f = reinterpret_cast<const std::uint8_t*>(base + c.hookFnRva);
+				if (std::memcmp(f, kPrologue, sizeof(kPrologue)) != 0) {
+					continue;
+				}
+				if (c.checkJmp) {
+					bool ok = false;
+					for (std::size_t o = 0; o + 7 <= 0x100; ++o) {
+						if (f[o] == 0x48 && f[o + 1] == 0xFF && f[o + 2] == 0x25) {
+							std::int32_t disp = 0;
+							std::memcpy(&disp, f + o + 3, sizeof(disp));
+							if (reinterpret_cast<std::uintptr_t>(f + o + 7) + static_cast<std::intptr_t>(disp) == base + c.slotRva) {
+								ok = true;
+								break;
+							}
+						}
+					}
+					if (!ok) {
+						continue;
+					}
+				}
+				build = &c;
+				break;
+			}
+			if (!build) {
+				logger::warn("late pass: PPA is a build this plugin does not know (known: 0.0.37; its hook function was not found at the expected place) - not hooking");
 				g_lateTries = 1000;
 				return;
 			}
-			const auto saved = *reinterpret_cast<const std::uintptr_t*>(base + kPpaSavedCalleeRva);
+			if (g_ppaSlotRva == 0) {
+				logger::info("late pass: recognised PPA build {} (hook function RVA {:X}, saved-callee slot RVA {:X})", build->name, build->hookFnRva, build->slotRva);
+			}
+			g_ppaSlotRva = build->slotRva;
+			const auto saved = *reinterpret_cast<const std::uintptr_t*>(base + g_ppaSlotRva);
 			const auto skyBase = REL::Module::get().base();
 			if (g_lateTries == 1 || g_lateTries == 4 || g_lateTries == 20 || g_lateTries == 40) {
 				logger::info("late pass try {}: PPA base {:X}, saved callee value {:X} (Skyrim base {:X})", g_lateTries, base, saved, skyBase);
@@ -420,7 +512,7 @@ namespace Eyes
 			// PPA ends its replacement with `jmp [saved]`. Whatever it saved may be the engine function or another plugin's hook, so rather
 			// than patching code we put OUR function into that pointer: PPA edits the face, jumps to us, we re-apply the eyes, then we
 			// jump on to what it had saved.
-			auto* slot = reinterpret_cast<std::uintptr_t*>(base + kPpaSavedCalleeRva);
+			auto* slot = reinterpret_cast<std::uintptr_t*>(base + g_ppaSlotRva);
 			DWORD oldProt = 0;
 			if (!::VirtualProtect(slot, sizeof(*slot), PAGE_READWRITE, &oldProt)) {
 				logger::error("late pass: VirtualProtect failed ({})", ::GetLastError());
@@ -461,7 +553,7 @@ namespace Eyes
 			return true;
 		}
 
-		void PublishToHook(State& a_st, RE::BSFaceGenAnimationData* a_fg, const float (&a_w)[4], float a_blend)
+		void PublishToHook(State& a_st, RE::BSFaceGenAnimationData* a_fg, const float (&a_w)[4], float a_blend, RE::FormID a_id = 0)
 		{
 			if (a_st.slot >= 0 && g_hookSlots[a_st.slot].fg.load() != a_fg) {
 				g_hookSlots[a_st.slot].fg.store(nullptr);
@@ -475,6 +567,9 @@ namespace Eyes
 						break;
 					}
 				}
+			}
+			if (a_st.slot >= 0 && a_id != 0) {
+				g_hookSlots[a_st.slot].formId.store(a_id, std::memory_order_relaxed);
 			}
 			if (a_st.slot >= 0) {
 				for (int i = 0; i < 4; ++i) {
@@ -503,6 +598,7 @@ namespace Eyes
 			if (it == g_state.end()) {
 				return;
 			}
+			ClearFaceLabGaze(a_id, it->second, 0.2f);
 			if (it->second.slot >= 0) {
 				g_hookSlots[it->second.slot].fg.store(nullptr);
 			}
@@ -689,8 +785,9 @@ namespace Eyes
 			slot.fluReq.fetch_add(1);
 			a_st.fluLeft = 0.25f + 0.35f + 2.0f * g_cfg.fluBlinkTime + g_cfg.fluGap + 0.25f + 0.5f + 0.3f;
 			a_st.fluNext = -1.0f;
-			if (g_cfg.diag) {
-				logger::info("flutter on {}: style {}, wide {:.2f}, brow {:.2f}, blinks {:.2f}s gap {:.2f}s", a_actor->GetName(), g_cfg.fluStyle,
+				g_flutterPlays.fetch_add(1, std::memory_order_relaxed);
+				if (g_cfg.diag || kBlinkWatch) {
+					logger::info("flutter on {}: style {}, wide {:.2f}, brow {:.2f}, blinks {:.2f}s gap {:.2f}s", a_actor->GetName(), g_cfg.fluStyle,
 					g_cfg.fluStrength, g_cfg.fluBrow, g_cfg.fluBlinkTime, g_cfg.fluGap);
 			}
 		}
@@ -727,6 +824,143 @@ namespace Eyes
 					}
 				}
 			}
+		}
+
+		// ---- FaceLab gaze path ------------------------------------------------------------------------------------------------------
+		// Weights measured live on a still head (see design/GazeDesign.md): what the eyes need so that she looks at the camera, by angle and by distance.
+		struct Pt
+		{
+			float x, y;
+		};
+
+		float Interp(const Pt* t, int n, float x)
+		{
+			if (x <= t[0].x) {
+				return t[0].y;
+			}
+			for (int i = 1; i < n; ++i) {
+				if (x <= t[i].x) {
+					const float k = (x - t[i - 1].x) / (t[i].x - t[i - 1].x);
+					return t[i - 1].y + (t[i].y - t[i - 1].y) * k;
+				}
+			}
+			return t[n - 1].y;
+		}
+
+		constexpr Pt kUpLook[] = { { 0.0f, 0.0f }, { 6.0f, 0.3f }, { 11.0f, 1.0f }, { 33.0f, 1.2f } };   // shipped LookUp (slides the eye: keep it modest)
+		constexpr Pt kUpTurn[] = { { 0.0f, 0.0f }, { 6.0f, 0.0f }, { 11.0f, 1.0f }, { 33.0f, 1.4f } };   // true rotation (10 degrees per 1.0)
+		constexpr Pt kUpWide[] = { { 0.0f, 0.0f }, { 6.0f, 0.0f }, { 11.0f, 0.15f }, { 33.0f, 0.15f } };  // a little lid lift so the upper lids make room
+constexpr Pt kCross[] = { { 8.0f, 0.9f }, { 12.0f, 0.9f }, { 17.0f, 0.7f }, { 23.0f, 0.4f }, { 28.0f, 0.3f }, { 30.0f, 0.2f }, { 60.0f, 0.12f }, { 177.0f, 0.1f }, { 500.0f, 0.06f } };  // inward turn by distance
+
+		// FaceLab weights for a camera at yaw / pitch degrees (+ yaw = to her right, + pitch = above) and dist game units from her eyes
+int GazeWeights(float a_yaw, float a_pitch, float a_dist, float a_range, FaceLabAPI::Weight* o, float a_yawScale = 1.0f, float a_vertScale = 1.0f)
+		{
+			int  n = 0;
+			auto add = [&](const char* ch, float v) {
+				v *= a_range;
+				if (v > 0.002f) {
+					o[n++] = { ch, std::min(v, 3.0f) };
+				}
+			};
+			const float ay = std::fabs(a_yaw);
+const float side = std::min(0.035f * ay, 1.6f) * a_yawScale;
+			if (a_yaw > 0.0f) {
+				add("EyeLeftLookRight", side);
+				add("EyeRightLookRight", side);
+			} else {
+				add("EyeLeftLookLeft", side);
+				add("EyeRightLookLeft", side);
+			}
+			if (a_pitch < 0.0f) {
+const float down = std::min(0.053f * -a_pitch, 2.0f) * a_vertScale;
+				add("EyeLeftLookDown", down);
+				add("EyeRightLookDown", down);
+			} else {
+const float up = Interp(kUpLook, 4, a_pitch) * a_vertScale;
+const float turn = Interp(kUpTurn, 4, a_pitch) * a_vertScale;
+				add("EyeLeftLookUp", up);
+				add("EyeRightLookUp", up);
+				add("EyeLeftTurnUp", turn);
+				add("EyeRightTurnUp", turn);
+				add("EyesWide", Interp(kUpWide, 4, a_pitch));
+			}
+add("EyesCross", Interp(kCross, 9, a_dist) * g_cfg.crossScale);
+			return n;
+		}
+
+		// 0 = use MFG, 1 = use FaceLab, -1 = skip this frame (FaceLab only and not possible, or the face is not built yet)
+		int ChooseGazeEngine(RE::Actor* a_actor)
+		{
+			if (g_cfg.gazeMode == 2 || !g_hooked) {
+				return 0;
+			}
+			const auto* fl = FaceLabAPI::Get();
+			if (!fl || fl->version < 6 || !fl->SetGaze) {
+				return g_cfg.gazeMode == 1 ? -1 : 0;
+			}
+			const int sup = fl->IsSupported(a_actor->GetFormID());
+			if (sup == 1) {
+				return 1;
+			}
+			if (sup < 0) {
+				return -1;  // her face is not built yet
+			}
+			return g_cfg.gazeMode == 1 ? -1 : 0;  // a head FaceLab has no morphs for
+		}
+
+		void ClearFaceLabGaze(RE::FormID a_id, State& a_st, float a_fade)
+		{
+			if (a_st.gazeSent) {
+				if (const auto* fl = FaceLabAPI::Get(); fl && fl->version >= 6 && fl->ClearGaze) {
+					fl->ClearGaze(a_id, "FourthWall", a_fade);
+				}
+				a_st.gazeSent = false;
+			}
+		}
+
+		// The gaze goes to FaceLab (per-eye morphs, far beyond what MFG can do); the engine's own look values are held at zero so its eye wander cannot add to it.
+		void DriveWithFaceLab(RE::Actor* a_actor, State& a_st, RE::BSFaceGenAnimationData* a_fg, float a_yaw, float a_pitch, float a_dist, float a_away, bool a_releasedByTimer,
+			float a_faceCtl, float a_dt, bool a_released)
+		{
+			const auto* fl = FaceLabAPI::Get();
+			if (a_st.gDist < 0.0f) {  // first frame on this actor: start where the camera is
+				a_st.gYaw = a_yaw * a_away;
+				a_st.gPitch = a_pitch * a_away;
+				a_st.gDist = a_dist;
+				a_st.gBlend = 0.0f;
+			}
+			const float ty = (a_yaw + a_st.awayYaw) * a_away;
+			const float tp = (a_pitch + a_st.awayPitch) * a_away;
+			const float step = g_cfg.speed * a_dt;
+			a_st.gYaw += Clamp(ty - a_st.gYaw, -step, step);
+			a_st.gPitch += Clamp(tp - a_st.gPitch, -step, step);
+			a_st.gDist += (a_dist - a_st.gDist) * std::min(1.0f, a_dt * 8.0f);
+			// hand-backs and the cross-eyed face ease the gaze in and out exactly as the MFG path does
+			const float target = a_releasedByTimer ? 0.0f : 1.0f - a_faceCtl;
+			if (target < a_st.gBlend) {
+				a_st.gBlend = std::max(target, a_st.gBlend - a_dt / std::max(g_fadeOut.load(), 0.05f));
+			} else {
+				a_st.gBlend = std::min(target, a_st.gBlend + a_dt / std::max(g_fadeIn.load(), 0.05f));
+			}
+			const float zero[4]{};
+			PublishToHook(a_st, a_fg, zero, a_st.gBlend, a_actor->GetFormID());  // the engine's four look values: ours = 0, faded back to the engine's own when we let go
+			if (a_st.gBlend < 0.002f) {
+				ClearFaceLabGaze(a_actor->GetFormID(), a_st, 0.1f);
+			} else {
+				FaceLabAPI::Weight w[12];
+const auto*        base = a_actor->GetActorBase();
+				const bool         male = base && base->GetSex() == RE::SEX::kMale;
+				const int          n = GazeWeights(a_st.gYaw, a_st.gPitch, a_st.gDist, g_cfg.strength * a_st.gBlend, w, male ? g_cfg.maleYawScale : 1.0f, male ? g_cfg.maleVertScale : 1.0f);
+if (n == 0) {
+					ClearFaceLabGaze(a_actor->GetFormID(), a_st, 0.1f);
+				} else {
+					fl->SetGaze(a_actor->GetFormID(), "FourthWall", w, static_cast<std::uint32_t>(n), 0.04f);
+					a_st.gazeSent = true;
+				}
+			}
+			UpdateFlutter(a_actor, a_st, a_dt, a_released);
+			a_st.wrote = true;
+			++a_st.writes;
 		}
 
 		void Drive(RE::Actor* a_actor, State& a_st, const RE::NiPoint3& a_cam, float a_dt)
@@ -801,8 +1035,30 @@ namespace Eyes
 			if (const auto* fl = FaceLabAPI::Get(); fl && fl->version >= 4) {
 				faceCtl = std::clamp(fl->GetEyeControl(a_actor->GetFormID()), 0.0f, 1.0f);
 			}
+			// When such a face ends, do not take the eyes back at once: one eye is often already near where the camera is, so only the other would move.
+			// Rest for a moment instead (the engine's natural eyes, both together), then fade the gaze in from there, so both eyes move together.
+			if (faceCtl > 0.02f) {
+				a_st.faceHold = g_cfg.faceSettle;
+			} else if (a_st.faceHold > 0.0f) {
+				a_st.faceHold -= a_dt;
+				faceCtl = 1.0f;  // still resting: treat the eyes as owned by the face
+			}
 			const bool released = releasedByTimer || faceCtl > 0.02f;
-			const float ty = Clamp((yawDeg + a_st.awayYaw) / g_cfg.maxYaw, -1.0f, 1.0f) * away;
+			const int  engine = ChooseGazeEngine(a_actor);
+			if (a_st.modeLogged != engine) {
+				a_st.modeLogged = engine;
+				logger::info("gaze engine for {:08X} {}: {}", a_actor->GetFormID(), a_actor->GetName(), engine > 0 ? "FaceLab (per-eye morphs)" : (engine == 0 ? "MFG" : "waiting / FaceLab only and not available"));
+			}
+			if (engine < 0) {
+				ClearFaceLabGaze(a_actor->GetFormID(), a_st, 0.1f);
+				return;
+			}
+			if (engine > 0) {
+				DriveWithFaceLab(a_actor, a_st, fg, yawDeg, pitchDeg, vl, away, releasedByTimer, faceCtl, a_dt, released);
+				return;
+			}
+			ClearFaceLabGaze(a_actor->GetFormID(), a_st, 0.1f);  // back on MFG (setting changed, or FaceLab went away)
+const float ty = Clamp((yawDeg + a_st.awayYaw) / g_cfg.maxYaw, -1.0f, 1.0f) * away;
 			const float tp = Clamp((pitchDeg + a_st.awayPitch) / g_cfg.maxPitch * g_cfg.verticalBoost, -1.0f, 1.0f) * away;
 
 			const float stepY = g_cfg.speed * a_dt / g_cfg.maxYaw;
@@ -818,7 +1074,7 @@ namespace Eyes
 			};
 
 			if (g_hooked) {
-				PublishToHook(a_st, fg, want, releasedByTimer ? 0.0f : 1.0f - faceCtl);
+				PublishToHook(a_st, fg, want, releasedByTimer ? 0.0f : 1.0f - faceCtl, a_actor->GetFormID());
 			}
 			UpdateFlutter(a_actor, a_st, a_dt, released);
 			bool          foreignNow = false;
@@ -989,6 +1245,22 @@ namespace Eyes
 		float        g_idleAccum{ 0.0f };
 		float        g_idleStill{ 0.0f };  // seconds the player has been standing still
 
+		// A conversation is on while the dialogue menu is open, and for a moment after it closes: conversation camera mods keep the shot for the closing line.
+		constexpr float kConversationHold = 1.0f;
+		bool            ConversationNow()
+		{
+			static Clock::time_point s_lastOpen{};
+			static bool              s_have = false;
+			auto*                    ui = RE::UI::GetSingleton();
+			const auto               now = Clock::now();
+			if (ui && ui->IsMenuOpen(RE::DialogueMenu::MENU_NAME)) {
+				s_lastOpen = now;
+				s_have = true;
+				return true;
+			}
+			return s_have && std::chrono::duration<float>(now - s_lastOpen).count() < kConversationHold;
+		}
+
 		// "Idle" = standing still in third person or the free camera, nothing going on: no menu or dialogue, no combat, weapons away,
 		// not riding, swimming or flying. Movement is sampled every 0.2 s so slow walking and sneaking count as moving.
 		bool PlayerIdleNow(float a_dt)
@@ -1024,8 +1296,49 @@ namespace Eyes
 			return g_idleStill >= g_cfg.idleDelay;
 		}
 
+// Cost of the Tick (main thread): logged every 30 s while characters are being driven, so a frame-rate drop can be blamed or cleared
+		struct TickPerf
+		{
+			Clock::time_point t0 = Clock::now();
+			~TickPerf()
+			{
+				static double            sumUs = 0.0, maxUs = 0.0;
+				static std::uint64_t     n = 0;
+				static Clock::time_point since = Clock::now();
+				const auto               end = Clock::now();
+				const double             us = std::chrono::duration<double, std::micro>(end - t0).count();
+				sumUs += us;
+				maxUs = std::max(maxUs, us);
+				++n;
+				if (std::chrono::duration<float>(end - since).count() >= 30.0f) {
+					if (!g_state.empty() && n > 0) {
+						logger::info("perf: Fourth Wall tick avg {:.0f} us, max {:.0f} us over {} ticks, driving {} characters", sumUs / static_cast<double>(n), maxUs, n, g_state.size());
+						if (kBlinkWatch) {
+							static std::uint64_t prevEp = 0, prevFr = 0, prevFl = 0;
+							const auto           ep = g_asymEpisodes.load(), fr = g_asymFrames.load(), fl = g_flutterPlays.load();
+							logger::info("blink watch (30 s): {} one-eye-blink episodes ({} frames with one lid shut and the other not), {} flutters started", ep - prevEp, fr - prevFr, fl - prevFl);
+							prevEp = ep;
+							prevFr = fr;
+							prevFl = fl;
+						}
+						if (g_lateHooked) {  // PPA late pass: how often something (PPA's face preset) had moved our eye values by the time the morphs were built
+							static std::uint64_t prevCalls = 0, prevFixed = 0;
+							const auto           c = g_lateCalls.load(), fx = g_lateFixed.load();
+							logger::info("late pass (PPA): {} face updates went through it in 30 s; on {} of them the eye values had been changed since our write and were put back", c - prevCalls, fx - prevFixed);
+							prevCalls = c;
+							prevFixed = fx;
+						}
+					}
+					sumUs = maxUs = 0.0;
+					n = 0;
+					since = end;
+				}
+			}
+		};
+
 		void Tick()
 		{
+			TickPerf perf_;
 			if (!g_running) {
 				return;
 			}
@@ -1056,6 +1369,30 @@ namespace Eyes
 				}
 			}
 
+			// testing aid (Calibration page): keep the engine's own eye wander out of the way while another mod (FaceLab) is being judged
+			static bool s_holdActive = false;
+			if (g_cfg.holdNeutral) {
+				if (auto* pl = RE::PlayerCharacter::GetSingleton(); pl && g_hooked) {
+					if (auto* fg = pl->GetFaceGenAnimationData()) {
+						auto it = g_state.find(pl->GetFormID());
+						if (it == g_state.end()) {
+							logger::info("hold neutral: the engine's eye look values are held at zero on the player");
+							it = g_state.emplace(pl->GetFormID(), State{}).first;
+						}
+						const float zero[4]{};
+						PublishToHook(it->second, fg, zero, 1.0f);
+						s_holdActive = true;
+					}
+				}
+				return;
+			}
+			if (s_holdActive) {
+				s_holdActive = false;
+				if (auto* pl = RE::PlayerCharacter::GetSingleton()) {
+					Release(pl->GetFormID());
+				}
+				logger::info("hold neutral: released");
+			}
 			if (!g_on) {
 				if (!g_state.empty()) {
 					ReleaseAll();
@@ -1085,6 +1422,18 @@ namespace Eyes
 					sources.push_back({ pl->GetFormID(), base && base->GetSex() == RE::SEXES::kFemale, true });
 				}
 			}
+			// conversation cameras: nobody looks into the camera while a conversation is open; everyone already driven fades back to the engine's eyes below
+			const bool paused = g_cfg.pauseInConversation && ConversationNow();
+			{
+				static bool s_pausedLogged = false;
+				if (paused != s_pausedLogged) {
+					s_pausedLogged = paused;
+					logger::info("conversation: {}", paused ? "eye contact paused (dialogue menu open)" : "over, eye contact resumes");
+				}
+			}
+			if (paused) {
+				sources.clear();
+			}
 			{
 				for (auto& e : sources) {
 					auto* actor = RE::TESForm::LookupByID<RE::Actor>(e.formID);
@@ -1107,11 +1456,28 @@ namespace Eyes
 			}
 			auto* uiMgr = RE::UI::GetSingleton();
 			const bool talking = uiMgr && uiMgr->IsMenuOpen(RE::DialogueMenu::MENU_NAME);
-			if (g_cfg.nearby && !talking) {
+			if (g_cfg.nearby && !talking && !paused) {
 				if (auto* pl = RE::ProcessLists::GetSingleton()) {
 					const float maxD = g_cfg.nearbyRadius * 70.0f;
+					struct Cand
+					{
+						RE::Actor* actor;
+						float      key;
+						bool       female;
+					};
+					std::vector<Cand> cands;
+					// is she on screen? the camera's own projection says so (a little margin around the edges)
+					RE::NiCamera* ncam = nullptr;
+					if (g_cfg.nearbyOnScreen && pc->cameraRoot) {
+						for (auto& child : pc->cameraRoot->GetChildren()) {
+							if (child && (ncam = netimmerse_cast<RE::NiCamera*>(child.get()))) {
+								break;
+							}
+						}
+					}
+					int candidates = 0;
 					for (auto& h : pl->highActorHandles) {
-						auto ptr = h.get();
+						auto  ptr = h.get();
 						auto* actor = ptr.get();
 						if (!actor || actor->IsDead() || !actor->Is3DLoaded() || seen.contains(actor->GetFormID())) {
 							continue;
@@ -1123,7 +1489,8 @@ namespace Eyes
 						}
 						const auto  p = actor->GetPosition();
 						const float dx = p.x - cam.x, dy = p.y - cam.y, dz = p.z - cam.z;
-						if (dx * dx + dy * dy + dz * dz > maxD * maxD) {
+						const float d2 = dx * dx + dy * dy + dz * dz;
+						if (d2 > maxD * maxD) {
 							continue;
 						}
 						auto*      base = actor->GetActorBase();
@@ -1132,6 +1499,29 @@ namespace Eyes
 						if (!Wanted(e, actor)) {
 							continue;
 						}
+						++candidates;
+						if (ncam) {
+							float sx = 0.0f, sy = 0.0f, sz = 0.0f;
+							const RE::NiPoint3 head{ p.x, p.y, p.z + 110.0f };
+							if (!RE::NiCamera::WorldPtToScreenPt3(ncam->worldToCam, ncam->port, head, sx, sy, sz, 1e-5f) || sx < -0.3f || sx > 1.3f || sy < -0.3f || sy > 1.3f) {
+								continue;
+							}
+						}
+						// the ones already driven count as closer, so two characters at the same distance do not keep swapping places
+						cands.push_back({ actor, d2 * (g_state.contains(e.formID) ? 0.5f : 1.0f), female });
+					}
+					std::sort(cands.begin(), cands.end(), [](const Cand& l, const Cand& r) { return l.key < r.key; });
+					const std::size_t limit = g_cfg.maxNearby > 0 ? static_cast<std::size_t>(g_cfg.maxNearby) : cands.size();
+					static Clock::time_point s_lastNearbyLog{};
+					if (std::chrono::duration<float>(now - s_lastNearbyLog).count() >= 10.0f) {
+						s_lastNearbyLog = now;
+						if (candidates > 0) {
+							logger::info("nearby: {} candidates, {} on screen, driving {} (limit {})", candidates, cands.size(), std::min(limit, cands.size()), g_cfg.maxNearby);
+						}
+					}
+					for (std::size_t i = 0; i < cands.size() && i < limit; ++i) {
+						auto*           actor = cands[i].actor;
+						const ActorEntry e{ actor->GetFormID(), cands[i].female };
 						seen[e.formID] = true;
 						auto it = g_state.find(e.formID);
 						if (it == g_state.end()) {
@@ -1242,14 +1632,20 @@ namespace Eyes
 		void Sanitize(Settings& s)
 		{
 			s.who = std::clamp(s.who, 0, 2);
-			s.strength = Clamp(s.strength, 0.0f, 1.0f);
+s.gazeMode = std::clamp(s.gazeMode, 0, 2);
+			s.maleYawScale = Clamp(s.maleYawScale, 0.3f, 1.5f);
+s.maleVertScale = Clamp(s.maleVertScale, 0.3f, 1.5f);
+			s.crossScale = Clamp(s.crossScale, 0.0f, 2.5f);
+s.strength = Clamp(s.strength, 0.0f, 1.0f);
 			s.speed = std::max(s.speed, 1.0f);
 			s.verticalBoost = Clamp(s.verticalBoost, 1.0f, 3.0f);
 			s.maxYaw = std::max(s.maxYaw, 1.0f);
 			s.maxPitch = std::max(s.maxPitch, 1.0f);
-			s.nearbyRadius = std::max(s.nearbyRadius, 1.0f);
+s.nearbyRadius = std::max(s.nearbyRadius, 1.0f);
+			s.maxNearby = std::clamp(s.maxNearby, 0, 30);
 			s.fadeOut = Clamp(s.fadeOut, 0.1f, 4.0f);
 			s.fadeIn = Clamp(s.fadeIn, 0.1f, 4.0f);
+			s.faceSettle = Clamp(s.faceSettle, 0.0f, 3.0f);
 			s.awayAngle = Clamp(s.awayAngle, 0.0f, 60.0f);
 			s.idleDelay = Clamp(s.idleDelay, 0.0f, 10.0f);
 			s.idleGiveUp = Clamp(s.idleGiveUp, 40.0f, 180.0f);
@@ -1284,18 +1680,25 @@ namespace Eyes
 		s.who = static_cast<int>(num("iWho", s.who));
 		s.includePlayer = flg("bIncludePlayer", s.includePlayer);
 		s.playerIdle = flg("bPlayerIdle", s.playerIdle);
+		s.pauseInConversation = flg("bPauseInConversation", s.pauseInConversation);
 		s.idleDelay = flt("fIdleDelay", s.idleDelay);
 		s.idleGiveUp = flt("fIdleGiveUp", s.idleGiveUp);
 		s.useOStim = flg("bUseOStim", s.useOStim);
 		s.useSexLab = flg("bUseSexLab", s.useSexLab);
 		s.useFlowerGirls = flg("bUseFlowerGirls", s.useFlowerGirls);
 		s.nearby = flg("bNearby", s.nearby);
-		s.nearbyRadius = flt("fNearbyRadius", s.nearbyRadius);
+s.nearbyRadius = flt("fNearbyRadius", s.nearbyRadius);
+			s.maxNearby = static_cast<int>(num("iMaxNearby", s.maxNearby));
+			s.nearbyOnScreen = flg("bNearbyOnScreen", s.nearbyOnScreen);
 		s.strength = flt("fStrength", s.strength);
 		s.speed = flt("fSpeed", s.speed);
 		s.giveUpAngle = flt("fGiveUpAngle", s.giveUpAngle);
-		s.verticalBoost = flt("fVerticalBoost", s.verticalBoost);
-		s.lookAway = flg("bLookAway", s.lookAway);
+			s.verticalBoost = flt("fVerticalBoost", s.verticalBoost);
+s.gazeMode = static_cast<int>(num("iGazeMode", s.gazeMode));
+			s.maleYawScale = flt("fMaleYawScale", s.maleYawScale);
+s.maleVertScale = flt("fMaleVertScale", s.maleVertScale);
+			s.crossScale = flt("fCrossScale", s.crossScale);
+s.lookAway = flg("bLookAway", s.lookAway);
 		s.awayEveryMin = flt("fAwayEveryMin", s.awayEveryMin);
 		s.awayEveryMax = flt("fAwayEveryMax", s.awayEveryMax);
 		s.awayDurMin = flt("fAwayDurMin", s.awayDurMin);
@@ -1308,6 +1711,7 @@ namespace Eyes
 		s.relDurMax = flt("fRelDurMax", s.relDurMax);
 		s.fadeOut = flt("fFadeOut", s.fadeOut);
 		s.fadeIn = flt("fFadeIn", s.fadeIn);
+		s.faceSettle = flt("fFaceSettle", s.faceSettle);
 		s.flutter = flg("bFlutter", s.flutter);
 		s.fluEveryMin = flt("fFluEveryMin", s.fluEveryMin);
 		s.fluEveryMax = flt("fFluEveryMax", s.fluEveryMax);
@@ -1346,14 +1750,14 @@ namespace Eyes
 			 "; Safe to edit by hand while the game is closed; delete this file to return to the defaults.\n"
 			 "[General]\n";
 		f << "bStartOn = " << b(s.startOn) << "\niHotkey = " << s.hotkey << "\niWho = " << s.who << "\nbIncludePlayer = " << b(s.includePlayer)
-		  << "\nbPlayerIdle = " << b(s.playerIdle) << "\nfIdleDelay = " << s.idleDelay << "\nfIdleGiveUp = " << s.idleGiveUp
+		  << "\nbPlayerIdle = " << b(s.playerIdle) << "\nbPauseInConversation = " << b(s.pauseInConversation) << "\nfIdleDelay = " << s.idleDelay << "\nfIdleGiveUp = " << s.idleGiveUp
 		  << "\nbUseOStim = " << b(s.useOStim) << "\nbUseSexLab = " << b(s.useSexLab) << "\nbUseFlowerGirls = " << b(s.useFlowerGirls)
-		  << "\nbNearby = " << b(s.nearby) << "\nfNearbyRadius = " << s.nearbyRadius << "\n";
-		f << "fStrength = " << s.strength << "\nfSpeed = " << s.speed << "\nfGiveUpAngle = " << s.giveUpAngle << "\nfVerticalBoost = " << s.verticalBoost << "\n";
+		  << "\nbNearby = " << b(s.nearby)<< "\nfNearbyRadius = " << s.nearbyRadius << "\niMaxNearby = " << s.maxNearby << "\nbNearbyOnScreen = " << b(s.nearbyOnScreen) << "\n";
+		f << "fStrength = " << s.strength << "\nfSpeed = " << s.speed << "\nfGiveUpAngle = " << s.giveUpAngle<< "\nfVerticalBoost = " << s.verticalBoost<< "\niGazeMode = " << s.gazeMode << "\nfMaleYawScale = " << s.maleYawScale<< "\nfMaleVertScale = " << s.maleVertScale << "\nfCrossScale = " << s.crossScale << "\n";
 		f << "bLookAway = " << b(s.lookAway) << "\nfAwayEveryMin = " << s.awayEveryMin << "\nfAwayEveryMax = " << s.awayEveryMax
 		  << "\nfAwayDurMin = " << s.awayDurMin << "\nfAwayDurMax = " << s.awayDurMax << "\nfAwayAngle = " << s.awayAngle << "\n";
 		f << "bRelease = " << b(s.release) << "\nfRelEveryMin = " << s.relEveryMin << "\nfRelEveryMax = " << s.relEveryMax
-		  << "\nfRelDurMin = " << s.relDurMin << "\nfRelDurMax = " << s.relDurMax << "\nfFadeOut = " << s.fadeOut << "\nfFadeIn = " << s.fadeIn << "\n";
+		  << "\nfRelDurMin = " << s.relDurMin << "\nfRelDurMax = " << s.relDurMax << "\nfFadeOut = " << s.fadeOut << "\nfFadeIn = " << s.fadeIn << "\nfFaceSettle = " << s.faceSettle << "\n";
 		f << "bFlutter = " << b(s.flutter) << "\nfFluEveryMin = " << s.fluEveryMin << "\nfFluEveryMax = " << s.fluEveryMax
 		  << "\nfFluStrength = " << s.fluStrength << "\nfFluBrow = " << s.fluBrow << "\niFluStyle = " << s.fluStyle
 		  << "\nfFluBlinkTime = " << s.fluBlinkTime << "\nfFluGap = " << s.fluGap << "\n";
@@ -1376,6 +1780,12 @@ namespace Eyes
 	bool IsOn()
 	{
 		return g_on;
+	}
+
+	int FaceLabStatus()
+	{
+		const auto* fl = FaceLabAPI::Get();
+		return !fl ? 0 : (fl->version >= 6 ? 2 : 1);
 	}
 
 	void SetOn(bool a_on)

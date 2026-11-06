@@ -36,7 +36,7 @@ namespace FaceLabAPI
 
 	struct Interface
 	{
-		std::uint32_t version;  // 5 (new functions are only ever added at the end; a v1 caller keeps working)
+		std::uint32_t version;  // 6 (new functions are only ever added at the end; a v1 caller keeps working)
 
 		// A named face from any mod's FaceLab/Presets/*.toml. A missing "X.Context.Pleased" falls back to X.Context.Neutral, X.Pleased, X.Neutral.
 		int (*ApplyPreset)(std::uint32_t formID, const char* owner, const char* preset, float fadeSeconds, int priority);
@@ -68,8 +68,17 @@ namespace FaceLabAPI
 
 		// ---- version 5 (check version >= 5 before using) ----
 		// The TongueOut weight of the face FaceLab shows on this actor: 0 = no tongue wanted, 1.0 = fully out, above 1 = further. Live and faded with the face.
-		// TongueLab obeys it (and has OStim equip a tongue if she has none). -1 = FaceLab has no face on her.
+		// A tongue mod can obey it (and have OStim equip a tongue if she has none). -1 = FaceLab has no face on her.
 		float (*GetTongue)(std::uint32_t formID);
+
+		// ---- version 6 (check version >= 6 before using) ----
+		// The GAZE layer: eye channels (Look*, EyeLeft*/EyeRight* Look and Turn, EyesCross, EyesWide, Blink, Squint, Brow ...) added ON TOP of whatever face is showing on the
+		// actor, or shown alone. It is not a face: it never competes with other layers and priorities do not apply. Several owners add up (0..3 per channel).
+		// Safe from any thread and cheap enough to call every frame: each call REPLACES your previous gaze (channels you leave out go back to zero).
+		// Only eye channels are accepted; anything else in the list is ignored. Returns 1 when accepted. It does not count as a face for GetEyeControl.
+		// Weights: 1.0 = a full RaceMenu weight, up to 3.0. The "Turn" channels are a true eye rotation of 10 degrees per 1.0.
+		int (*SetGaze)(std::uint32_t formID, const char* owner, const Weight* weights, std::uint32_t count, float fadeSeconds);
+		int (*ClearGaze)(std::uint32_t formID, const char* owner, float fadeSeconds);
 	};
 
 	inline const Interface* Get()

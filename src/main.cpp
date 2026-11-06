@@ -83,7 +83,7 @@ SKSEPluginLoad(const SKSE::LoadInterface* a_skse)
 {
 	InitLogging();
 	SKSE::Init(a_skse);
-	logger::info("The Fourth Wall 1.1.0 loaded (runtime {})", REL::Module::get().version().string());
+	logger::info("The Fourth Wall 1.1.1 loaded (runtime {})", REL::Module::get().version().string());
 	SKSE::GetMessagingInterface()->RegisterListener(OnMessage);
 	return true;
 }

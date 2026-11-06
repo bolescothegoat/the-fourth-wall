@@ -277,16 +277,28 @@ namespace UI
 			static const char* kWho[] = { "All scene actors", "Female only", "Male only" };
 			Choice("Actors", c.who, kWho, 3, "Which of the other people in a scene look at the camera (your own character is controlled separately above). Also used for the nearby characters below.");
 
+			G::SeparatorText("Conversations");
+			Note("Conversation camera mods (Cinematic Conversation Camera, Alternate Conversation Camera and similar) stage you and the character you are talking to for each other. With this on, nobody looks into the camera while a conversation is open (and for a second after), so the eye contact in the conversation is left to the game or to that mod. Everyone returns to the camera afterwards.");
+			Check("Pause during conversations", c.pauseInConversation, "On: no eye contact with the camera while the dialogue menu is open, for scene actors, nearby characters and your own character. Off: the old behaviour (scene actors keep looking at the camera, even in a conversation).");
+
 			G::SeparatorText("Other characters nearby");
 			Note("Off by default. Turn it on and ordinary characters near the camera (followers, townsfolk, anyone) look at it too, even outside scenes. It uses the Actors filter above, skips anyone in combat, with a weapon drawn, or talking to you, and leaves their eyes natural when the camera is behind them.");
 			Check("Nearby characters look at the camera too", c.nearby, "On: ordinary characters near the camera also look at it, not only scene actors and your own character.");
 			G::BeginDisabled(!c.nearby);
-			Slider("Nearby radius", c.nearbyRadius, 2.0f, 40.0f, "%.0f m", "How far from the camera, in metres, characters are included.");
+Slider("Nearby radius", c.nearbyRadius, 2.0f, 40.0f, "%.0f m", "How far from the camera, in metres, characters are included.");
+			float maxNear = static_cast<float>(c.maxNearby);
+			Slider("Maximum nearby characters", maxNear, 0.0f, 20.0f, "%.0f", "At most this many nearby characters look at the camera at once, the nearest first. Every character the plugin drives has its face updated every frame, so a cap keeps busy places cheap. 0 = no limit.");
+			c.maxNearby = static_cast<int>(maxNear + 0.5f);
+			Check("Only characters on screen", c.nearbyOnScreen, "Skip characters the camera cannot see (behind you, round a corner of the view). You cannot see their eyes anyway, so this saves work.");
 			G::EndDisabled();
 
 			G::SeparatorText("Eye movement");
-			Slider("Strength", c.strength, 0.0f, 1.0f, "%.2f", "How far the eyes turn toward the camera. 1.0 = full, lower = more subtle.");
-			Slider("Eye speed", c.speed, 30.0f, 900.0f, "%.0f deg/s", "How fast the eyes follow the camera. Lower = lazier, slower glances.");
+			Slider("Eye range", c.strength, 0.0f, 1.0f, "%.2f", "How far the eyes turn toward the camera. 1.0 = the full, calibrated amount, lower = more subtle for every direction.");
+			static const char* kGaze[] = { "Auto (FaceLab when possible)", "FaceLab only", "MFG only" };
+			Choice("Gaze engine", c.gazeMode, kGaze, 3, "What moves the eyes. FaceLab moves each eye separately, further, with a natural inward turn for a close camera; it needs FaceLab and a High Poly Head. MFG is the original method that works on any head. Auto uses FaceLab where it can and MFG everywhere else.");
+			const int fls = Eyes::FaceLabStatus();
+			G::TextDisabled(fls == 2 ? "FaceLab: found, gaze layer available" : (fls == 1 ? "FaceLab: found, but too old for the gaze layer (update FaceLab)" : "FaceLab: not installed (MFG is used)"));
+Slider("Eye speed", c.speed, 30.0f, 900.0f, "%.0f deg/s", "How fast the eyes follow the camera. Lower = lazier, slower glances.");
 			Slider("Give-up angle", c.giveUpAngle, 40.0f, 180.0f, "%.0f deg",
 				"If the camera is further than this to the side of or behind them, the eyes drift back to centre instead of straining. 180 = never give up.");
 			Slider("Up / down boost", c.verticalBoost, 1.0f, 3.0f, "%.1f",
@@ -320,6 +332,7 @@ namespace UI
 			Slider("Longest release", c.relDurMax, 0.5f, 60.0f, "%.1f s", "");
 			Slider("Time to let go of the camera", c.fadeOut, 0.1f, 4.0f, "%.1f s", "How long it takes to hand the eyes back to the scene at the start of a release.");
 			Slider("Time to return to the camera", c.fadeIn, 0.1f, 4.0f, "%.1f s", "How long it takes to bring the eyes back onto the camera at the end of a release. Higher = a softer, slower return.");
+			Slider("Rest after a FaceLab face (crossed eyes)", c.faceSettle, 0.0f, 3.0f, "%.1f s", "When a FaceLab face with crossed eyes (an ahegao) ends, the eyes first rest on their own for this long, both together, and only then return to the camera. 0 = hand back at once (one eye may move more than the other).");
 			G::EndDisabled();
 
 			SaveBar();
@@ -361,6 +374,14 @@ namespace UI
 			Slider("Up / down offset", c.pitchOffset, -30.0f, 30.0f, "%.0f deg", "Nudges where the eyes aim vertically.");
 			Slider("Full left/right turn at", c.maxYaw, 10.0f, 60.0f, "%.0f deg", "Camera angle at which the eyes reach their full sideways turn. Matches MFG Fix's fTrackEyeXY (28).");
 			Slider("Full up/down turn at", c.maxPitch, 10.0f, 70.0f, "%.0f deg", "Camera angle at which the eyes reach their full vertical turn. Matches MFG Fix's fTrackEyeZ (40).");
+
+Slider("Inward turn (close camera)", c.crossScale, 0.0f, 2.5f, "%.2f", "FaceLab gaze: how strongly the eyes turn in toward a close camera. 1.0 = the calibrated amount, 0 = none. Only matters when the camera is near her face.");
+			G::SeparatorText("Male characters (FaceLab gaze)");
+			Slider("Sideways amount", c.maleYawScale, 0.3f, 1.5f, "%.2f", "Male eyes are smaller, so the same turn goes further. Lower this if a male character's eyes overshoot when looking left or right.");
+			Slider("Up / down amount", c.maleVertScale, 0.3f, 1.5f, "%.2f", "The same for looking up and down on male characters.");
+			G::SeparatorText("Testing");
+			Check("Hold the engine's eyes neutral (testing)", c.holdNeutral,
+				"For judging other face mods: keeps your character's own eye look values at zero so the eyes stop wandering. Everything else in this mod pauses while it is on. Not saved; it is off every time the game starts.");
 
 			G::SeparatorText("Troubleshooting");
 			Check("Write a diagnostic log", c.diag,

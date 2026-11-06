@@ -1,6 +1,7 @@
 {
   "name": "fourthwall",
-  "version-string": "0.1.0",
+  "version-string": "1.1.1",
+  "builtin-baseline": "f77c3a8c05623fb02ff062ba41e6f5f9db97cde0",
   "dependencies": [
     "spdlog", "fmt", "rapidcsv", "tomlplusplus", "toml11", "nlohmann-json", "detours",
     "directxtk", "directxmath", "simpleini", "xbyak"

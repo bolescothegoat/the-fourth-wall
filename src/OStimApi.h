@@ -4,7 +4,7 @@
 #pragma once
 
 // Interop declaration for OStim Standalone's thread API (OStim.dll export RequestPluginAPI_Thread, OStim 7.5.x).
-// The virtual order and struct layouts must match OStim's exactly, including members OVoices never calls.
+// The virtual order and struct layouts must match OStim's exactly, including members this plugin never calls.
 
 namespace OStimApi
 {

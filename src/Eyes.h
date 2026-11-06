@@ -20,13 +20,21 @@ namespace Eyes
 		bool         useSexLab{ true };
 		bool         useFlowerGirls{ true };
 		bool         nearby{ false };           // also drive ordinary NPCs near the camera (outside OStim scenes)
+int          maxNearby{ 5 };            // at most this many nearby characters are driven at once, the nearest first (0 = no limit)
+		bool         nearbyOnScreen{ true };    // only nearby characters the camera can see
 		float        nearbyRadius{ 12.0f };     // metres from the camera
+		bool         pauseInConversation{ true };  // nobody looks at the camera while a conversation is open (and for a moment after): conversation cameras stage the two people for each other
 
 		// ---- eye movement ----
 		float strength{ 1.0f };       // 0..1 multiplier on the look values
 		float speed{ 300.0f };        // deg/s the eyes may move
 		float giveUpAngle{ 180.0f };  // camera further than this from where she faces: eyes drift back to centre
 		float verticalBoost{ 3.0f };  // multiplies the up/down deflection (many heads barely show vertical looks)
+int          gazeMode{ 0 };
+		float        maleYawScale{ 0.85f };   // FaceLab gaze, male characters: sideways amount (smaller eyes turn further per weight)
+float        maleVertScale{ 1.0f };
+		float        crossScale{ 1.0f };      // FaceLab gaze: how strongly the eyes turn inward for a close camera (1.0 = the calibrated table)   // ... up / down amount
+		int          gazeModeDummy_{ 0 };         // 0 Auto (FaceLab when it can, else MFG), 1 FaceLab only, 2 MFG only
 
 		// ---- glance ----
 		bool  lookAway{ true };
@@ -44,6 +52,7 @@ namespace Eyes
 		float relDurMax{ 5.0f };
 		float fadeOut{ 0.5f };  // seconds to let go of the eyes
 		float fadeIn{ 1.2f };   // seconds to take them back
+		float faceSettle{ 0.8f };  // seconds the eyes rest on their own after a FaceLab face with crossed eyes ends, before the gaze comes back (both eyes return together)
 
 		// ---- flutter ----
 		bool  flutter{ true };
@@ -71,6 +80,7 @@ namespace Eyes
 		float overshoot{ 1.0f };  // values above 1.0 are invalid in the face data, so no overshoot
 		bool  writeLayer1{ true };
 		bool  writeTarget{ true };
+		bool  holdNeutral{ false };  // testing aid (not saved): hold the engine's four look values at zero on the player, nothing else runs
 	};
 
 	Settings& Cfg();
@@ -84,6 +94,8 @@ namespace Eyes
 	bool IsOn();
 	void SetOn(bool a_on);
 	std::int32_t Hotkey();
+	// FaceLab for the gaze: 0 not installed, 1 installed but older than the gaze layer (API v6), 2 ready
+	int FaceLabStatus();
 	// which scene frameworks were found at startup: bit 0 OStim API, bit 1 SexLab, bit 2 Flower Girls
 	std::uint32_t Frameworks();
 	void SetKeyCapture(bool a_on);  // the menu is waiting for a new hotkey: the hotkey itself must not fire
