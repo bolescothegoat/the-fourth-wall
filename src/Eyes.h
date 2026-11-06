@@ -23,6 +23,7 @@ namespace Eyes
 int          maxNearby{ 5 };            // at most this many nearby characters are driven at once, the nearest first (0 = no limit)
 		bool         nearbyOnScreen{ true };    // only nearby characters the camera can see
 		float        nearbyRadius{ 12.0f };     // metres from the camera
+		int          nearbyWho{ 3 };            // who the nearby characters are: 0 everyone, 1 female only, 2 male only, 3 the same as 'who' (the default: as before)
 		bool         pauseInConversation{ true };  // nobody looks at the camera while a conversation is open (and for a moment after): conversation cameras stage the two people for each other
 
 		// ---- eye movement ----

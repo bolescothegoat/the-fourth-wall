@@ -117,7 +117,7 @@ namespace Eyes
 			return true;
 		}
 
-		bool Wanted(const ActorEntry& a_e, const RE::Actor* a_actor)
+		bool Wanted(const ActorEntry& a_e, const RE::Actor* a_actor, int a_who)
 		{
 			if (!a_actor) {
 				return false;
@@ -128,13 +128,18 @@ namespace Eyes
 			if (a_actor->IsPlayerRef()) {
 				return g_cfg.includePlayer;  // the player is not subject to the male / female filter
 			}
-			if (g_cfg.who == 1) {
+			if (a_who == 1) {
 				return a_e.female;
 			}
-			if (g_cfg.who == 2) {
+			if (a_who == 2) {
 				return !a_e.female;
 			}
 			return true;
+		}
+
+		bool Wanted(const ActorEntry& a_e, const RE::Actor* a_actor)
+		{
+			return Wanted(a_e, a_actor, g_cfg.who);
 		}
 
 		// ---- final-buffer hook -------------------------------------------------------------------------------------------------
@@ -1496,7 +1501,7 @@ const float ty = Clamp((yawDeg + a_st.awayYaw) / g_cfg.maxYaw, -1.0f, 1.0f) * aw
 						auto*      base = actor->GetActorBase();
 						const bool female = base && base->GetSex() == RE::SEXES::kFemale;
 						const ActorEntry e{ actor->GetFormID(), female };
-						if (!Wanted(e, actor)) {
+						if (!Wanted(e, actor, g_cfg.nearbyWho == 3 ? g_cfg.who : g_cfg.nearbyWho)) {
 							continue;
 						}
 						++candidates;
@@ -1632,6 +1637,7 @@ const float ty = Clamp((yawDeg + a_st.awayYaw) / g_cfg.maxYaw, -1.0f, 1.0f) * aw
 		void Sanitize(Settings& s)
 		{
 			s.who = std::clamp(s.who, 0, 2);
+			s.nearbyWho = std::clamp(s.nearbyWho, 0, 3);
 s.gazeMode = std::clamp(s.gazeMode, 0, 2);
 			s.maleYawScale = Clamp(s.maleYawScale, 0.3f, 1.5f);
 s.maleVertScale = Clamp(s.maleVertScale, 0.3f, 1.5f);
@@ -1678,6 +1684,7 @@ s.nearbyRadius = std::max(s.nearbyRadius, 1.0f);
 		s.startOn = flg("bStartOn", s.startOn);
 		s.hotkey = static_cast<std::int32_t>(num("iHotkey", s.hotkey));
 		s.who = static_cast<int>(num("iWho", s.who));
+		s.nearbyWho = static_cast<int>(num("iNearbyWho", s.nearbyWho));
 		s.includePlayer = flg("bIncludePlayer", s.includePlayer);
 		s.playerIdle = flg("bPlayerIdle", s.playerIdle);
 		s.pauseInConversation = flg("bPauseInConversation", s.pauseInConversation);
@@ -1749,7 +1756,7 @@ s.lookAway = flg("bLookAway", s.lookAway);
 		f << "; FourthWall settings. Written by the in-game menu (SKSE Menu Framework > The Fourth Wall > Save settings).\n"
 			 "; Safe to edit by hand while the game is closed; delete this file to return to the defaults.\n"
 			 "[General]\n";
-		f << "bStartOn = " << b(s.startOn) << "\niHotkey = " << s.hotkey << "\niWho = " << s.who << "\nbIncludePlayer = " << b(s.includePlayer)
+		f << "bStartOn = " << b(s.startOn) << "\niHotkey = " << s.hotkey << "\niWho = " << s.who << "\niNearbyWho = " << s.nearbyWho << "\nbIncludePlayer = " << b(s.includePlayer)
 		  << "\nbPlayerIdle = " << b(s.playerIdle) << "\nbPauseInConversation = " << b(s.pauseInConversation) << "\nfIdleDelay = " << s.idleDelay << "\nfIdleGiveUp = " << s.idleGiveUp
 		  << "\nbUseOStim = " << b(s.useOStim) << "\nbUseSexLab = " << b(s.useSexLab) << "\nbUseFlowerGirls = " << b(s.useFlowerGirls)
 		  << "\nbNearby = " << b(s.nearby)<< "\nfNearbyRadius = " << s.nearbyRadius << "\niMaxNearby = " << s.maxNearby << "\nbNearbyOnScreen = " << b(s.nearbyOnScreen) << "\n";

@@ -275,16 +275,18 @@ namespace UI
 
 			G::SeparatorText("Scene actors");
 			static const char* kWho[] = { "All scene actors", "Female only", "Male only" };
-			Choice("Actors", c.who, kWho, 3, "Which of the other people in a scene look at the camera (your own character is controlled separately above). Also used for the nearby characters below.");
+			Choice("Actors", c.who, kWho, 3, "Which of the other people in a scene look at the camera (your own character is controlled separately above). Nearby characters have their own choice below.");
 
 			G::SeparatorText("Conversations");
 			Note("Conversation camera mods (Cinematic Conversation Camera, Alternate Conversation Camera and similar) stage you and the character you are talking to for each other. With this on, nobody looks into the camera while a conversation is open (and for a second after), so the eye contact in the conversation is left to the game or to that mod. Everyone returns to the camera afterwards.");
 			Check("Pause during conversations", c.pauseInConversation, "On: no eye contact with the camera while the dialogue menu is open, for scene actors, nearby characters and your own character. Off: the old behaviour (scene actors keep looking at the camera, even in a conversation).");
 
 			G::SeparatorText("Other characters nearby");
-			Note("Off by default. Turn it on and ordinary characters near the camera (followers, townsfolk, anyone) look at it too, even outside scenes. It uses the Actors filter above, skips anyone in combat, with a weapon drawn, or talking to you, and leaves their eyes natural when the camera is behind them.");
+			Note("Off by default. Turn it on and ordinary characters near the camera (followers, townsfolk, anyone) look at it too, even outside scenes. Who looks is chosen below. It skips anyone in combat, with a weapon drawn, or talking to you, and leaves their eyes natural when the camera is behind them.");
 			Check("Nearby characters look at the camera too", c.nearby, "On: ordinary characters near the camera also look at it, not only scene actors and your own character.");
 			G::BeginDisabled(!c.nearby);
+			static const char* kNearWho[] = { "Everyone", "Female only", "Male only", "Same as Actors above" };
+			Choice("Who looks", c.nearbyWho, kNearWho, 4, "Which of the nearby characters look at the camera. 'Same as Actors above' (the default) follows the scene Actors choice; pick 'Everyone' or 'Male only' here to include men without changing who looks in scenes.");
 Slider("Nearby radius", c.nearbyRadius, 2.0f, 40.0f, "%.0f m", "How far from the camera, in metres, characters are included.");
 			float maxNear = static_cast<float>(c.maxNearby);
 			Slider("Maximum nearby characters", maxNear, 0.0f, 20.0f, "%.0f", "At most this many nearby characters look at the camera at once, the nearest first. Every character the plugin drives has its face updated every frame, so a cap keeps busy places cheap. 0 = no limit.");
