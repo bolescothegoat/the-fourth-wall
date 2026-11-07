@@ -296,8 +296,8 @@ Slider("Nearby radius", c.nearbyRadius, 2.0f, 40.0f, "%.0f m", "How far from the
 
 			G::SeparatorText("Eye movement");
 			Slider("Eye range", c.strength, 0.0f, 1.0f, "%.2f", "How far the eyes turn toward the camera. 1.0 = the full, calibrated amount, lower = more subtle for every direction.");
-			static const char* kGaze[] = { "Auto (FaceLab when possible)", "FaceLab only", "MFG only" };
-			Choice("Gaze engine", c.gazeMode, kGaze, 3, "What moves the eyes. FaceLab moves each eye separately, further, with a natural inward turn for a close camera; it needs FaceLab and a High Poly Head. MFG is the original method that works on any head. Auto uses FaceLab where it can and MFG everywhere else.");
+			static const char* kGaze[] = { "FaceLab: you and scene actors (MFG for the rest)", "FaceLab: everyone", "MFG: everyone", "FaceLab: you only (MFG for the rest)" };
+			Choice("Gaze engine", c.gazeMode, kGaze, 4, "What moves the eyes. FaceLab moves each eye separately, further, with a natural inward turn for a close camera; it needs FaceLab and a High Poly Head, and costs about 0.6 ms per character per frame while the eyes move. MFG is the original method that works on any head and costs next to nothing. The first choice (default) uses FaceLab for your character and for scene actors and MFG for background characters nearby; 'you only' uses FaceLab on your character alone; 'everyone' uses it wherever it can. Pick MFG for the best frame rate.");
 			const int fls = Eyes::FaceLabStatus();
 			G::TextDisabled(fls == 2 ? "FaceLab: found, gaze layer available" : (fls == 1 ? "FaceLab: found, but too old for the gaze layer (update FaceLab)" : "FaceLab: not installed (MFG is used)"));
 Slider("Eye speed", c.speed, 30.0f, 900.0f, "%.0f deg/s", "How fast the eyes follow the camera. Lower = lazier, slower glances.");

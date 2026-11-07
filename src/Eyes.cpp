@@ -81,6 +81,10 @@ namespace Eyes
 			float             gDist{ -1.0f };                 // smoothed camera distance in game units
 			float             gBlend{ 1.0f };                 // 1 = our gaze, 0 = handed back to the engine
 			bool              gazeSent{ false };
+			float             gazeLastV[12]{};      // what was last sent to FaceLab, so an unchanged gaze is not sent again
+			const char*       gazeLastCh[12]{};
+			int               gazeLastN{ 0 };
+			Clock::time_point gazeLastAt{};
 			int               modeLogged{ -1 };
 			RE::BSFaceGenAnimationData* fgPtr{ nullptr };
 			Clock::time_point lastLog{};
@@ -893,10 +897,19 @@ add("EyesCross", Interp(kCross, 9, a_dist) * g_cfg.crossScale);
 			return n;
 		}
 
+		std::atomic<std::uint64_t> g_gazeSends{ 0 }, g_gazeSkips{ 0 };  // for the perf line: gaze updates sent to FaceLab / skipped because nothing visible had changed
+
 		// 0 = use MFG, 1 = use FaceLab, -1 = skip this frame (FaceLab only and not possible, or the face is not built yet)
-		int ChooseGazeEngine(RE::Actor* a_actor)
+		int ChooseGazeEngine(RE::Actor* a_actor, const State& a_st)
 		{
-			if (g_cfg.gazeMode == 2 || !g_hooked) {
+			// Per-eye FaceLab morphs cost about 0.6 ms per character per frame while the eyes move; the plain MFG eyes cost nothing worth measuring.
+			//   0 = FaceLab for your character and scene actors, MFG for everyone else (the nearby background characters)   [default]
+			//   1 = FaceLab for everyone it can (and nothing at all for a head it cannot do)
+			//   2 = MFG for everyone
+			//   3 = FaceLab for your character only, MFG for everyone else
+			const int  mode = g_cfg.gazeMode;
+			const bool player = a_actor->IsPlayerRef();
+			if (mode == 2 || !g_hooked || (mode == 0 && a_st.idleSource && !player) || (mode == 3 && !player)) {
 				return 0;
 			}
 			const auto* fl = FaceLabAPI::Get();
@@ -959,8 +972,26 @@ const auto*        base = a_actor->GetActorBase();
 if (n == 0) {
 					ClearFaceLabGaze(a_actor->GetFormID(), a_st, 0.1f);
 				} else {
-					fl->SetGaze(a_actor->GetFormID(), "FourthWall", w, static_cast<std::uint32_t>(n), 0.04f);
-					a_st.gazeSent = true;
+					// The same eyes as the last call (to within what nobody can see) change nothing, and FaceLab can rebuild the face for every call: do not ask again.
+					// A refresh is still sent once a second.
+					const auto nowT = Clock::now();
+					bool       same = a_st.gazeSent && n == a_st.gazeLastN && std::chrono::duration<float>(nowT - a_st.gazeLastAt).count() < 1.0f;
+					for (int i = 0; same && i < n; ++i) {
+						same = std::strcmp(w[i].channel, a_st.gazeLastCh[i]) == 0 && std::fabs(w[i].value - a_st.gazeLastV[i]) < 0.004f;
+					}
+					if (same) {
+						++g_gazeSkips;
+					} else {
+						fl->SetGaze(a_actor->GetFormID(), "FourthWall", w, static_cast<std::uint32_t>(n), 0.04f);
+						a_st.gazeSent = true;
+						a_st.gazeLastN = n;
+						a_st.gazeLastAt = nowT;
+						for (int i = 0; i < n; ++i) {
+							a_st.gazeLastCh[i] = w[i].channel;
+							a_st.gazeLastV[i] = w[i].value;
+						}
+						++g_gazeSends;
+					}
 				}
 			}
 			UpdateFlutter(a_actor, a_st, a_dt, a_released);
@@ -1049,7 +1080,7 @@ if (n == 0) {
 				faceCtl = 1.0f;  // still resting: treat the eyes as owned by the face
 			}
 			const bool released = releasedByTimer || faceCtl > 0.02f;
-			const int  engine = ChooseGazeEngine(a_actor);
+			const int  engine = ChooseGazeEngine(a_actor, a_st);
 			if (a_st.modeLogged != engine) {
 				a_st.modeLogged = engine;
 				logger::info("gaze engine for {:08X} {}: {}", a_actor->GetFormID(), a_actor->GetName(), engine > 0 ? "FaceLab (per-eye morphs)" : (engine == 0 ? "MFG" : "waiting / FaceLab only and not available"));
@@ -1317,7 +1348,7 @@ const float ty = Clamp((yawDeg + a_st.awayYaw) / g_cfg.maxYaw, -1.0f, 1.0f) * aw
 				++n;
 				if (std::chrono::duration<float>(end - since).count() >= 30.0f) {
 					if (!g_state.empty() && n > 0) {
-						logger::info("perf: Fourth Wall tick avg {:.0f} us, max {:.0f} us over {} ticks, driving {} characters", sumUs / static_cast<double>(n), maxUs, n, g_state.size());
+						logger::info("perf: Fourth Wall tick avg {:.0f} us, max {:.0f} us over {} ticks, driving {} characters; FaceLab gaze updates sent {} / skipped {}", sumUs / static_cast<double>(n), maxUs, n, g_state.size(), g_gazeSends.exchange(0), g_gazeSkips.exchange(0));
 						if (kBlinkWatch) {
 							static std::uint64_t prevEp = 0, prevFr = 0, prevFl = 0;
 							const auto           ep = g_asymEpisodes.load(), fr = g_asymFrames.load(), fl = g_flutterPlays.load();
@@ -1638,7 +1669,7 @@ const float ty = Clamp((yawDeg + a_st.awayYaw) / g_cfg.maxYaw, -1.0f, 1.0f) * aw
 		{
 			s.who = std::clamp(s.who, 0, 2);
 			s.nearbyWho = std::clamp(s.nearbyWho, 0, 3);
-s.gazeMode = std::clamp(s.gazeMode, 0, 2);
+s.gazeMode = std::clamp(s.gazeMode, 0, 3);
 			s.maleYawScale = Clamp(s.maleYawScale, 0.3f, 1.5f);
 s.maleVertScale = Clamp(s.maleVertScale, 0.3f, 1.5f);
 			s.crossScale = Clamp(s.crossScale, 0.0f, 2.5f);

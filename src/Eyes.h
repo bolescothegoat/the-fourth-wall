@@ -35,7 +35,7 @@ int          gazeMode{ 0 };
 		float        maleYawScale{ 0.85f };   // FaceLab gaze, male characters: sideways amount (smaller eyes turn further per weight)
 float        maleVertScale{ 1.0f };
 		float        crossScale{ 1.0f };      // FaceLab gaze: how strongly the eyes turn inward for a close camera (1.0 = the calibrated table)   // ... up / down amount
-		int          gazeModeDummy_{ 0 };         // 0 Auto (FaceLab when it can, else MFG), 1 FaceLab only, 2 MFG only
+		int          gazeModeDummy_{ 0 };         // 0 FaceLab for you and scene actors / MFG for the rest (default), 1 FaceLab for everyone, 2 MFG for everyone, 3 FaceLab for you only / MFG for the rest
 
 		// ---- glance ----
 		bool  lookAway{ true };
