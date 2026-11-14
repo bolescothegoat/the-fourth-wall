@@ -79,6 +79,7 @@ float        maleVertScale{ 1.0f };
 
 #ifdef FW_VR_BUILD
 		// ---- VR diagnostic build only (iVRLevel in FourthWall.ini) ----
+		bool  vrUseHmd{ false };  // aim at the engine's HmdNode instead of the camera root (bVRUseHmdNode); the camera root was confirmed correct by a tester
 		int   vrLevel{ 0 };  // 0 probe only (log, no hooks) | 1 observe (the hook only reads; headset / camera probe) | 2 full (only after the struct probe passed)
 #endif
 

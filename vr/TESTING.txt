@@ -1,4 +1,4 @@
-THE FOURTH WALL VR - DIAGNOSTIC BUILD 0.1.0
+THE FOURTH WALL VR - DIAGNOSTIC BUILD 0.1.1
 ============================================
 Thank you for testing. This is an early build whose job is to find out whether the
 mod's eye-contact feature works in Skyrim VR. Please follow the steps in order.
@@ -21,6 +21,12 @@ TEST STEPS  (edit Data/SKSE/Plugins/FourthWall.ini, restart the game each time)
  3. iVRLevel = 2 : load a save, stand near NPCs, then start an OStim or SexLab scene.
                    Note whether NPCs' eyes follow you, and whether anything looks wrong.
  Stop and report if the game crashes or looks wrong at any step.
+
+NEW IN 0.1.1: the log now reads the engine's own headset nodes (HmdNode, UprightHmdNode) and
+prints how far they are from the camera. The ini defaults to level 2 now, since level 2 ran
+fine for the first tester; set iVRLevel back to 0 or 1 if anything misbehaves.
+Optional second test: set bVRUseHmdNode = 1 and tell me whether the eyes look better, same
+or worse than with 0.
 
 WHAT TO SEND ME (after each step)
  - FourthWallVR.log from your SKSE log folder (My Games > Skyrim VR > SKSE)

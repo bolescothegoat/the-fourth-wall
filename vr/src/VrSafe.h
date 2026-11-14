@@ -86,5 +86,42 @@ inline int VrProbeStruct(RE::BSFaceGenAnimationData* a_self) noexcept
 	}
 }
 
+// The engine's own headset nodes (PlayerCharacter VR node data): HmdNode is the live-tracked headset pose, UprightHmdNode the yaw-smoothed one.
+// Raw pointers and plain floats only inside the __try function; a bad read is reported, never thrown.
+struct VrHmdRead
+{
+	bool  dataOk{ false };   // GetVRNodeData() answered and the read did not fault
+	bool  hasHmd{ false };   // HmdNode non-null
+	bool  hasUpright{ false };
+	float hmd[3]{ 0, 0, 0 };      // world translate
+	float upright[3]{ 0, 0, 0 };
+};
+
+inline VrHmdRead VrReadHmdNodes(RE::PlayerCharacter* a_p) noexcept
+{
+	VrHmdRead r;
+	__try {
+		auto* d = a_p ? a_p->GetVRNodeData() : nullptr;
+		if (!d) {
+			return r;
+		}
+		r.dataOk = true;
+		if (auto* h = d->HmdNode.get()) {
+			r.hasHmd = true;
+			r.hmd[0] = h->world.translate.x;
+			r.hmd[1] = h->world.translate.y;
+			r.hmd[2] = h->world.translate.z;
+		}
+		if (auto* u = d->UprightHmdNode.get()) {
+			r.hasUpright = true;
+			r.upright[0] = u->world.translate.x;
+			r.upright[1] = u->world.translate.y;
+			r.upright[2] = u->world.translate.z;
+		}
+	} __except (EXCEPTION_EXECUTE_HANDLER) {
+		r.dataOk = false;
+	}
+	return r;
+}
 
 }

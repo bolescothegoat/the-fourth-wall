@@ -228,6 +228,7 @@ namespace Eyes
 		using FwVr::VrCodeProbe;
 		using FwVr::VrProbeCode;
 		using FwVr::VrProbeStruct;
+		using FwVr::VrReadHmdNodes;
 
 		// returns the hook address, or 0 (and logs why) when anything does not look right
 		std::uintptr_t VrResolveHook()
@@ -276,50 +277,14 @@ namespace Eyes
 			}
 		}
 
-		// the headset: a node called HmdNode somewhere under the player (first / third person) or the camera; the camera root as the fallback
-		RE::NiPointer<RE::NiAVObject> g_vrHmd;
-		RE::NiAVObject*               g_vrHmdRoot1{ nullptr };
-		RE::NiAVObject*               g_vrHmdRoot2{ nullptr };
-		const char*                   g_vrHmdWhere{ "not searched" };
-
-		RE::NiAVObject* VrFindHmd(RE::PlayerCharacter* a_p, RE::PlayerCamera* a_pc, const char** a_where)
-		{
-			static const RE::BSFixedString kName("HmdNode");
-			RE::NiAVObject*                r1 = a_p->Get3D1(true);
-			RE::NiAVObject*                r2 = a_p->Get3D1(false);
-			if (g_vrHmd && r1 == g_vrHmdRoot1 && r2 == g_vrHmdRoot2) {
-				*a_where = g_vrHmdWhere;
-				return g_vrHmd.get();
-			}
-			g_vrHmdRoot1 = r1;
-			g_vrHmdRoot2 = r2;
-			g_vrHmd.reset();
-			struct Try
-			{
-				RE::NiAVObject* root;
-				const char*     name;
-			} tries[3] = { { r1, "player first-person 3D" }, { r2, "player third-person 3D" }, { a_pc && a_pc->cameraRoot ? a_pc->cameraRoot.get() : nullptr, "camera root" } };
-			for (auto& t : tries) {
-				if (t.root) {
-					if (auto* o = t.root->GetObjectByName(kName)) {
-						g_vrHmd.reset(o);
-						g_vrHmdWhere = t.name;
-						*a_where = t.name;
-						return o;
-					}
-				}
-			}
-			g_vrHmdWhere = "HmdNode not found";
-			*a_where = g_vrHmdWhere;
-			return nullptr;
-		}
-
+		// The headset: the engine's own HmdNode (PlayerCharacter VR node data), read crash-protected. The camera root is the look-at target by default
+		// (a tester confirmed the eyes meet the camera with it); bVRUseHmdNode aims at HmdNode instead.
 		RE::NiPoint3 VrCameraPos(RE::PlayerCamera* a_pc)
 		{
-			if (auto* p = RE::PlayerCharacter::GetSingleton()) {
-				const char* w = nullptr;
-				if (auto* h = VrFindHmd(p, a_pc, &w)) {
-					return h->world.translate;
+			if (g_cfg.vrUseHmd) {
+				const auto r = VrReadHmdNodes(RE::PlayerCharacter::GetSingleton());
+				if (r.dataOk && r.hasHmd) {
+					return { r.hmd[0], r.hmd[1], r.hmd[2] };
 				}
 			}
 			return a_pc->cameraRoot->world.translate;
@@ -370,18 +335,14 @@ namespace Eyes
 				}
 				return;
 			}
-			const char*  where = nullptr;
-			auto*        hmd = VrFindHmd(p, pc, &where);
 			const auto   cr = pc->cameraRoot ? pc->cameraRoot->world.translate : RE::NiPoint3{};
 			const auto   pp = p->GetPosition();
-			float        dist = -1.0f;
-			RE::NiPoint3 h{};
-			if (hmd) {
-				h = hmd->world.translate;
-				dist = std::sqrt((h.x - cr.x) * (h.x - cr.x) + (h.y - cr.y) * (h.y - cr.y) + (h.z - cr.z) * (h.z - cr.z));
-			}
-			logger::info("VR probe: firstPerson={} | HmdNode: {} ({}, {:.0f} {:.0f} {:.0f}) | cameraRoot {:.0f} {:.0f} {:.0f} | HmdNode<->cameraRoot {:.1f} units | player {:.0f} {:.0f} {:.0f} | hook calls {} sane={} abort={}",
-				pc->IsInFirstPerson() ? 1 : 0, hmd ? "found" : "NOT FOUND", where ? where : "-", h.x, h.y, h.z, cr.x, cr.y, cr.z, dist, pp.x, pp.y, pp.z, g_vrCalls.load(), g_vrSane.load() ? 1 : 0, g_vrAbort.load() ? 1 : 0);
+			const auto   r = VrReadHmdNodes(p);
+			auto         dist = [&](const float* a_v) { return std::sqrt((a_v[0] - cr.x) * (a_v[0] - cr.x) + (a_v[1] - cr.y) * (a_v[1] - cr.y) + (a_v[2] - cr.z) * (a_v[2] - cr.z)); };
+			logger::info("VR probe: firstPerson={} | VR node data {} | HmdNode {} ({:.0f} {:.0f} {:.0f}) {:.1f} from cameraRoot | UprightHmdNode {} ({:.0f} {:.0f} {:.0f}) {:.1f} from cameraRoot | cameraRoot {:.0f} {:.0f} {:.0f} | player {:.0f} {:.0f} {:.0f} | target {} | hook calls {} sane={} abort={}",
+				pc->IsInFirstPerson() ? 1 : 0, r.dataOk ? "ok" : "UNREADABLE", r.hasHmd ? "found" : "null", r.hmd[0], r.hmd[1], r.hmd[2], r.hasHmd ? dist(r.hmd) : -1.0f,
+				r.hasUpright ? "found" : "null", r.upright[0], r.upright[1], r.upright[2], r.hasUpright ? dist(r.upright) : -1.0f, cr.x, cr.y, cr.z, pp.x, pp.y, pp.z,
+				g_cfg.vrUseHmd ? "HmdNode" : "cameraRoot", g_vrCalls.load(), g_vrSane.load() ? 1 : 0, g_vrAbort.load() ? 1 : 0);
 		}
 
 		void VrStartProbeThread()
@@ -1999,6 +1960,7 @@ s.lookAway = flg("bLookAway", s.lookAway);
 		s.diag = flg("bDiag", s.diag);
 #ifdef FW_VR_BUILD
 		s.vrLevel = std::clamp(static_cast<int>(num("iVRLevel", 0)), 0, 2);
+		s.vrUseHmd = flg("bVRUseHmdNode", false);
 #endif
 		Sanitize(s);
 		g_cfg = s;
