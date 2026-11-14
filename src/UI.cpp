@@ -215,10 +215,8 @@ namespace UI
 			Check("On when the game starts", c.startOn, "On: eye contact is already active when you load in. Off: press the hotkey to start it.");
 
 			G::SeparatorText("Hotkey");
-			G::Text("Toggle eye contact:  %s", KeyName(c.hotkey).c_str());
-			G::SameLine();
+			// look for the key BEFORE the name is drawn, so a key that was just pressed is shown in this very frame (not on the next redraw)
 			if (g_waitKey) {
-				G::Button("Press a key...  (Esc cancels)");
 				const int k = PollKey();
 				if (k == -1) {
 					EndKeyWait();
@@ -227,6 +225,11 @@ namespace UI
 					EndKeyWait();
 					Dirty();
 				}
+			}
+			G::Text("Toggle eye contact:  %s", KeyName(c.hotkey).c_str());
+			G::SameLine();
+			if (g_waitKey) {
+				G::Button("Press a key...  (Esc cancels)");
 			} else {
 				if (G::Button("Change key")) {
 					BeginKeyWait();

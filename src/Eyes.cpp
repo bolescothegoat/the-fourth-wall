@@ -499,7 +499,7 @@ namespace Eyes
 				break;
 			}
 			if (!build) {
-				logger::warn("late pass: PPA is a build this plugin does not know (known: 0.0.37; its hook function was not found at the expected place) - not hooking");
+				logger::info("late pass: not hooking PPA (the hook is only used for PPA 0.0.37; newer PPA builds, 0.0.39 included, work without it - this is intended, not a fault)");
 				g_lateTries = 1000;
 				return;
 			}
@@ -647,15 +647,19 @@ namespace Eyes
 
 
 
-		// Which local axes of "NPC Head [Head]" point forward / up. Found at run time from an upright actor (the player), because the
-		// skeleton convention is not documented anywhere I could verify. Logged once.
+		// Which local axes of "NPC Head [Head]" point forward / up. The Skyrim skeleton convention is axis 1 = forward (+), axis 2 = up (+);
+		// every healthy log seen (several players, several installs) measures exactly that. It is used from the start and NEVER replaced by a
+		// measurement: an earlier version measured it once from the player and kept the answer, and when the player's head happened to be
+		// pitched far over at that moment the wrong axes were locked in for the whole session (every aim angle became garbage and the eyes
+		// were clamped to the far left / far right). The measurement below is kept only to log a one-line comparison.
 		struct Calib
 		{
-			bool  ok{ false };
-			int   fwdIdx{ 0 }, upIdx{ 0 };
+			bool  ok{ true };
+			int   fwdIdx{ 1 }, upIdx{ 2 };
 			float fwdSign{ 1 }, upSign{ 1 };
 		};
 		Calib g_cal;
+		bool  g_calChecked{ false };
 
 		RE::NiAVObject* HeadNode(RE::Actor* a_actor)
 		{
@@ -670,7 +674,7 @@ namespace Eyes
 
 		void TryCalibrate(RE::Actor* a_actor)
 		{
-			if (g_cal.ok) {
+			if (g_calChecked) {
 				return;
 			}
 			auto* head = HeadNode(a_actor);
@@ -705,15 +709,15 @@ namespace Eyes
 			if (fi < 0 || std::fabs(best) < 0.5f) {
 				return;  // head turned too far from the body to tell
 			}
-			g_cal.ok = true;
-			g_cal.upIdx = ui;
-			g_cal.upSign = c[ui].z > 0 ? 1.0f : -1.0f;
-			g_cal.fwdIdx = fi;
-			g_cal.fwdSign = best > 0 ? 1.0f : -1.0f;
-			logger::info("head axes calibrated from {}: local axis {} is UP ({:+.0f}), local axis {} is FORWARD ({:+.0f}) "
-						 "[axes in world: x({:+.2f} {:+.2f} {:+.2f}) y({:+.2f} {:+.2f} {:+.2f}) z({:+.2f} {:+.2f} {:+.2f}); body heading ({:+.2f} {:+.2f})]",
-				a_actor->GetName(), ui, g_cal.upSign, fi, g_cal.fwdSign, c[0].x, c[0].y, c[0].z, c[1].x, c[1].y, c[1].z, c[2].x, c[2].y,
-				c[2].z, hx, hy);
+			g_calChecked = true;
+			const float mUpSign = c[ui].z > 0 ? 1.0f : -1.0f;
+			const float mFwdSign = best > 0 ? 1.0f : -1.0f;
+			const bool  same = (ui == g_cal.upIdx && fi == g_cal.fwdIdx && mUpSign == g_cal.upSign && mFwdSign == g_cal.fwdSign);
+			logger::info("head axes: using the standard skeleton convention (axis {} up {:+.0f}, axis {} forward {:+.0f}). Measured on {}: axis {} up ({:+.0f}), "
+						 "axis {} forward ({:+.0f}) - {} [axes in world: x({:+.2f} {:+.2f} {:+.2f}) y({:+.2f} {:+.2f} {:+.2f}) z({:+.2f} {:+.2f} {:+.2f}); body heading ({:+.2f} {:+.2f})]",
+				g_cal.upIdx, g_cal.upSign, g_cal.fwdIdx, g_cal.fwdSign, a_actor->GetName(), ui, mUpSign, fi, mFwdSign,
+				same ? "matches" : "differs (head probably pitched over at that moment); the standard convention is kept", c[0].x, c[0].y, c[0].z,
+				c[1].x, c[1].y, c[1].z, c[2].x, c[2].y, c[2].z, hx, hy);
 		}
 
 		float RandF(float a_lo, float a_hi)
