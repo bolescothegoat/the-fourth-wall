@@ -339,6 +339,21 @@ namespace Eyes
 			const auto   pp = p->GetPosition();
 			const auto   r = VrReadHmdNodes(p);
 			auto         dist = [&](const float* a_v) { return std::sqrt((a_v[0] - cr.x) * (a_v[0] - cr.x) + (a_v[1] - cr.y) * (a_v[1] - cr.y) + (a_v[2] - cr.z) * (a_v[2] - cr.z)); };
+			// the rendered camera: the NiCamera under the camera root, and the camera state (0 first person, 1 auto vanity, 3 free, 5 tween, 6 third person, 7 mount, ...)
+			RE::NiPoint3 ncamPos{};
+			bool         haveNcam = false;
+			if (pc->cameraRoot) {
+				for (auto& child : pc->cameraRoot->GetChildren()) {
+					if (auto* nc = child ? netimmerse_cast<RE::NiCamera*>(child.get()) : nullptr) {
+						ncamPos = nc->world.translate;
+						haveNcam = true;
+						break;
+					}
+				}
+			}
+			const int camState = pc->currentState ? static_cast<int>(pc->currentState->id) : -1;
+			const float ncamD = haveNcam ? std::sqrt((ncamPos.x - cr.x) * (ncamPos.x - cr.x) + (ncamPos.y - cr.y) * (ncamPos.y - cr.y) + (ncamPos.z - cr.z) * (ncamPos.z - cr.z)) : -1.0f;
+			logger::info("VR camera: state {} | NiCamera {} ({:.0f} {:.0f} {:.0f}) {:.1f} from cameraRoot | player {:.0f} {:.0f} {:.0f}", camState, haveNcam ? "found" : "NOT FOUND", ncamPos.x, ncamPos.y, ncamPos.z, ncamD, pp.x, pp.y, pp.z);
 			logger::info("VR probe: firstPerson={} | VR node data {} | HmdNode {} ({:.0f} {:.0f} {:.0f}) {:.1f} from cameraRoot | UprightHmdNode {} ({:.0f} {:.0f} {:.0f}) {:.1f} from cameraRoot | cameraRoot {:.0f} {:.0f} {:.0f} | player {:.0f} {:.0f} {:.0f} | target {} | hook calls {} sane={} abort={}",
 				pc->IsInFirstPerson() ? 1 : 0, r.dataOk ? "ok" : "UNREADABLE", r.hasHmd ? "found" : "null", r.hmd[0], r.hmd[1], r.hmd[2], r.hasHmd ? dist(r.hmd) : -1.0f,
 				r.hasUpright ? "found" : "null", r.upright[0], r.upright[1], r.upright[2], r.hasUpright ? dist(r.upright) : -1.0f, cr.x, cr.y, cr.z, pp.x, pp.y, pp.z,
@@ -350,7 +365,7 @@ namespace Eyes
 			g_vrProbeThread = std::jthread([](std::stop_token a_stop) {
 				int n = 0;
 				while (!a_stop.stop_requested() && n < 400) {
-					std::this_thread::sleep_for(std::chrono::seconds(n < 20 ? 3 : 15));
+					std::this_thread::sleep_for(std::chrono::seconds(n < 60 ? 3 : 10));
 					++n;
 					SKSE::GetTaskInterface()->AddTask([n]() { VrProbeOnce(n); });
 				}

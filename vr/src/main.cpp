@@ -61,7 +61,7 @@ namespace
 
 extern "C" __declspec(dllexport) constinit SKSE::PluginVersionData SKSEPlugin_Version = []() {
 	SKSE::PluginVersionData v{};
-	v.PluginVersion({ 0, 1, 1, 0 });
+	v.PluginVersion({ 0, 1, 2, 0 });
 	v.PluginName("FourthWallVR");
 	v.AuthorName("Bolescothegoat");
 	v.UsesAddressLibrary();
@@ -75,7 +75,7 @@ extern "C" __declspec(dllexport) bool SKSEPlugin_Query(const SKSE::QueryInterfac
 {
 	a_info->infoVersion = SKSE::PluginInfo::kVersion;
 	a_info->name = "FourthWallVR";
-	a_info->version = REL::Version(0, 1, 1, 0).pack();
+	a_info->version = REL::Version(0, 1, 2, 0).pack();
 	return true;
 }
 
@@ -83,7 +83,7 @@ SKSEPluginLoad(const SKSE::LoadInterface* a_skse)
 {
 	InitLogging();
 	SKSE::Init(a_skse);
-	logger::info("The Fourth Wall VR DIAGNOSTIC 0.1.1 (based on 1.1.3) loaded (runtime {})", REL::Module::get().version().string());
+	logger::info("The Fourth Wall VR DIAGNOSTIC 0.1.2 (based on 1.1.3) loaded (runtime {})", REL::Module::get().version().string());
 	SKSE::GetMessagingInterface()->RegisterListener(OnMessage);
 	return true;
 }
