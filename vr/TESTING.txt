@@ -1,0 +1,29 @@
+THE FOURTH WALL VR - DIAGNOSTIC BUILD 0.1.0
+============================================
+Thank you for testing. This is an early build whose job is to find out whether the
+mod's eye-contact feature works in Skyrim VR. Please follow the steps in order.
+
+REQUIREMENTS
+ - Skyrim VR 1.4.15, SKSEVR 2.0.12
+ - Address Library for SKSE Plugins AND "VR Address Library for SKSEVR"
+   (Nexus mod 58101). The file Data/SKSE/Plugins/version-1-4-15-0.csv must exist.
+ - Latest Visual C++ Redistributable (x64)
+ - OStim and/or SexLab for VR if you want to test scenes
+
+INSTALL
+ Install this folder as a mod (MO2/Vortex) or copy the SKSE folder into Data/.
+ Do NOT install it together with the normal "The Fourth Wall" (SE/AE) plugin.
+
+TEST STEPS  (edit Data/SKSE/Plugins/FourthWall.ini, restart the game each time)
+ 1. iVRLevel = 0 : load a save, wait 1 minute, quit.
+ 2. iVRLevel = 1 : load a save, walk around, turn and tilt your head for 1-2 minutes,
+                   stand near an NPC. Quit.
+ 3. iVRLevel = 2 : load a save, stand near NPCs, then start an OStim or SexLab scene.
+                   Note whether NPCs' eyes follow you, and whether anything looks wrong.
+ Stop and report if the game crashes or looks wrong at any step.
+
+WHAT TO SEND ME (after each step)
+ - FourthWallVR.log from your SKSE log folder (My Games > Skyrim VR > SKSE)
+ - Any crash log (crash-*.log) from that same folder
+ - A line on what you saw: eyes following you? wrong direction? nothing?
+ - Which of OStim / SexLab you use, and their versions.

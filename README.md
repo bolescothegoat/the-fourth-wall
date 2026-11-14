@@ -7,6 +7,7 @@ An SKSE plugin for Skyrim SE / AE that makes player and NPC eyes look into the c
 - License: GNU GPL v3 or later (see `LICENSE`)
 - Build instructions: `BUILDING.md`
 - Development timeline: `DEVELOPMENT_HISTORY.md`
+- Skyrim VR (experimental diagnostic build, separate DLL): `vr/`
 
 ## How it works
 
