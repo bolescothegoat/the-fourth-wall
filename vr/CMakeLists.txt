@@ -2,7 +2,7 @@
 # Copyright (C) 2026 Bolescothegoat
 cmake_minimum_required(VERSION 3.21)
 
-project(FourthWallVR VERSION 0.1.0 LANGUAGES CXX)
+project(FourthWallVR VERSION 0.2.0 LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 23)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)

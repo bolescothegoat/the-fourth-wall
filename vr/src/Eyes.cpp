@@ -1925,7 +1925,11 @@ s.nearbyRadius = std::max(s.nearbyRadius, 1.0f);
 		s.who = static_cast<int>(num("iWho", s.who));
 		s.nearbyWho = static_cast<int>(num("iNearbyWho", s.nearbyWho));
 		s.includePlayer = flg("bIncludePlayer", s.includePlayer);
+#ifdef FW_VR_BUILD
+		s.playerIdle = flg("bPlayerIdle", false);  // VR: the engine reports no first-person state (camera state 9), and your own face is not seen in VR
+#else
 		s.playerIdle = flg("bPlayerIdle", s.playerIdle);
+#endif
 		s.pauseInConversation = flg("bPauseInConversation", s.pauseInConversation);
 		s.idleDelay = flt("fIdleDelay", s.idleDelay);
 		s.idleGiveUp = flt("fIdleGiveUp", s.idleGiveUp);
@@ -1976,6 +1980,7 @@ s.lookAway = flg("bLookAway", s.lookAway);
 #ifdef FW_VR_BUILD
 		s.vrLevel = std::clamp(static_cast<int>(num("iVRLevel", 0)), 0, 2);
 		s.vrUseHmd = flg("bVRUseHmdNode", false);
+		s.vrProbe = flg("bVRProbe", false);
 #endif
 		Sanitize(s);
 		g_cfg = s;
@@ -2068,7 +2073,7 @@ s.lookAway = flg("bLookAway", s.lookAway);
 		g_on = g_cfg.startOn;
 #ifdef FW_VR_BUILD
 		g_vrLevel.store(g_cfg.vrLevel);
-		logger::info("VR diagnostic build: level {} ({})", g_cfg.vrLevel, g_cfg.vrLevel == 0 ? "probe only: no hooks, nothing is touched" : g_cfg.vrLevel == 1 ? "observe: the hook only reads, no writes" : "full: writes only after the struct probe passes");
+		logger::info("VR build: level {} ({})", g_cfg.vrLevel, g_cfg.vrLevel == 0 ? "probe only: no hooks, nothing is touched" : g_cfg.vrLevel == 1 ? "observe: the hook only reads, no writes" : "full: writes only after the struct probe passes");
 		VrLogEnvironment();
 		if (!VrDbPresent()) {
 			logger::error("VR: Data/SKSE/Plugins/version-1-4-15-0.csv is MISSING. Install 'VR Address Library for SKSEVR' (Nexus mod 58101). Without it this plugin makes no engine calls and does nothing.");
@@ -2085,7 +2090,9 @@ s.lookAway = flg("bLookAway", s.lookAway);
 			logger::error("VR: the hook was not installed; staying passive");
 			return true;
 		}
-		VrStartProbeThread();
+		if (g_cfg.vrLevel == 1 || g_cfg.vrProbe) {
+			VrStartProbeThread();  // headset / camera positions every few seconds: always at level 1, optional (bVRProbe = 1) at level 2
+		}
 		if (g_cfg.vrLevel == 1) {
 			logger::info("VR level 1: hook installed in observe mode (reads only). Walk around and move your head; the log records headset vs camera positions.");
 			return true;
