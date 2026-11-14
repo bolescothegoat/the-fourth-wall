@@ -14,6 +14,27 @@ set(BUILD_TESTS OFF CACHE BOOL "" FORCE)
 set(ENABLE_SKYRIM_SE ON CACHE BOOL "" FORCE)
 set(ENABLE_SKYRIM_AE ON CACHE BOOL "" FORCE)
 set(ENABLE_SKYRIM_VR OFF CACHE BOOL "" FORCE)
+# Keep the build machine's folder names out of the DLL (the log macros embed __FILE__). The compiler records normalised paths, so each
+# folder is trimmed in both slash styles: this project, CommonLibSSE-NG, vcpkg's installed packages and any CMAKE_PREFIX_PATH entry.
+if(MSVC)
+	set(_fw_trim "${COMMONLIB_DIR}" "${CMAKE_SOURCE_DIR}" "${CMAKE_BINARY_DIR}")
+	if(VCPKG_INSTALLED_DIR)
+		list(APPEND _fw_trim "${VCPKG_INSTALLED_DIR}")
+	endif()
+	foreach(_p IN LISTS CMAKE_PREFIX_PATH)
+		list(APPEND _fw_trim "${_p}")
+	endforeach()
+	foreach(_d IN LISTS _fw_trim)
+		if(_d)
+			get_filename_component(_d "${_d}" ABSOLUTE)
+			file(TO_NATIVE_PATH "${_d}" _d_native)
+			foreach(_v IN ITEMS "${_d}" "${_d_native}")
+				string(APPEND CMAKE_CXX_FLAGS " /d1trimfile:\"${_v}\"")
+			endforeach()
+		endif()
+	endforeach()
+endif()
+
 add_subdirectory("${COMMONLIB_DIR}" "${CMAKE_BINARY_DIR}/commonlib" EXCLUDE_FROM_ALL)
 
 add_library(FourthWall SHARED
