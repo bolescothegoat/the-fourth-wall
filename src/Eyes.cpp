@@ -189,8 +189,9 @@ namespace Eyes
 		HookSlot      g_hookSlots[kHookSlots];
 		std::atomic<std::uint64_t> g_hookCalls{ 0 };
 		std::atomic<std::uint64_t> g_hookWrites{ 0 };
-		// Dev aid for the 'one eye blinks rapidly' report: logs when the final buffer has one eyelid shut and the other not, and every flutter. Switch off (false) before release.
-		constexpr bool             kBlinkWatch = true;
+		// Part of the diagnostic log: records frames with one eyelid shut and the other not. Follows the 'Write a diagnostic log' setting; the main
+		// thread copies it here because the face hook runs on another thread.
+		std::atomic<bool>          g_blinkWatch{ false };
 		std::atomic<std::uint64_t> g_asymEpisodes{ 0 }, g_asymFrames{ 0 }, g_flutterPlays{ 0 };
 		std::atomic<int>           g_blinkWatchLines{ 0 };  // detail lines are capped per session
 		bool (*g_origKeyframes)(RE::BSFaceGenAnimationData*, float, bool){ nullptr };
@@ -318,7 +319,7 @@ namespace Eyes
 						}
 					}
 					// ---- blink watch: after everything of ours has been written, is one eyelid shut and the other not? ----
-					if (kBlinkWatch && fin.values && fin.count > kBlinkR) {
+					if (g_blinkWatch.load(std::memory_order_relaxed) && fin.values && fin.count > kBlinkR) {
 						const float bL = fin.values[kBlinkL], bR = fin.values[kBlinkR];
 						if (std::fabs(bL - bR) > 0.30f) {
 							g_asymFrames.fetch_add(1, std::memory_order_relaxed);
@@ -350,196 +351,10 @@ namespace Eyes
 			return r;
 		}
 
-		// diag: dump the two engine functions another mod (PPA) patches a call inside, to find out where it re-writes the face after us
-		void DumpCallSites()
-		{
-			for (std::uint64_t id : { 26999ull, 26418ull }) {
-				const auto addr = REL::ID(id).address();
-				const auto* b = reinterpret_cast<const std::uint8_t*>(addr);
-				std::string hex;
-				for (int i = 0; i < 0x80; ++i) {
-					hex += fmt::format("{:02X} ", b[i]);
-				}
-				logger::info("callsite fn id {} @ rva {:X}: {}", id, addr - REL::Module::get().base(), hex);
-				const auto* c = b + 0x13;
-				if (c[0] == 0xE8) {
-					std::int32_t rel;
-					std::memcpy(&rel, c + 1, 4);
-					const auto  tgt = reinterpret_cast<std::uintptr_t>(c) + 5 + rel;
-					HMODULE     mod = nullptr;
-					char        name[260]{};
-					if (::GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT, reinterpret_cast<LPCSTR>(tgt), &mod) && mod) {
-						::GetModuleFileNameA(mod, name, sizeof(name));
-					}
-					const auto* t = reinterpret_cast<const std::uint8_t*>(tgt);
-					std::string th;
-					for (int i = 0; i < 0x20; ++i) {
-						th += fmt::format("{:02X} ", t[i]);
-					}
-					logger::info("  call at +0x13 -> {:X} (module '{}', skyrim rva {:X}) first bytes: {}", tgt, name[0] ? name : "(none: trampoline/heap)", tgt - REL::Module::get().base(), th);
-				} else {
-					logger::info("  byte at +0x13 is {:02X} (not a direct call)", c[0]);
-				}
-			}
-		}
-
-		// ---- late pass --------------------------------------------------------------------------------------------------------
-		// PPA (Procedural Penis Animations, AccuratePenetration.dll) patches a call inside BSFaceGenNiNode's morph step (Address Library
-		// ID 26999, +0x13). Its replacement edits the face buffers and then tail-jumps to the original callee, which turns the buffers
-		// into morphs. That runs AFTER KeyframesUpdate, so PPA's face preset (blowjobs) wiped our eye values. We detour the original
-		// callee (the address PPA saved) and re-apply the four look slots right before the morphs are built, after PPA's edit.
-		// Known PPA builds: its replacement function (RVA) and the .data slot where it keeps the original callee it tail-jumps to (RVA).
-		// 0.0.39 was found by scanning for the one function with 0.0.37's prologue that ends in `jmp [rip+x]` into .data; its installer stores the original call target
-		// in that slot. checkJmp: also require that function's final `jmp [slot]` to point at the slot (consistency of the two numbers).
-		struct PpaBuild
-		{
-			const char*   name;
-			std::uintptr_t hookFnRva;
-			std::uintptr_t slotRva;
-			bool          checkJmp;
-		};
-		constexpr PpaBuild kPpaBuilds[] = {
-			// 0.0.39 (hook fn 0x13EA60, slot 0x252078, checkJmp) is DISABLED: found by static analysis only, never verified in a scene, and on 2026-11-06 PPA 0.0.39 lost its
-			// bone / sound output while this slot was patched (fine again with The Fourth Wall disabled). Do not re-enable without a live check.
-			{ "0.0.37", 0x11E1D0, 0x22AA08, false },
-		};
-		std::uintptr_t           g_ppaSlotRva{ 0 };
-		constexpr std::size_t    kFaceNodeAnimDataOffset = 0x150;  // BSFaceGenNiNode::animationData (SE/AE)
-		std::uintptr_t (*g_origMorphStep)(void*, bool){ nullptr };
-		bool                       g_lateHooked{ false };
-		int                        g_lateTries{ 0 };
-		std::atomic<std::uint64_t> g_lateCalls{ 0 };
-		std::atomic<std::uint64_t> g_lateFixed{ 0 };  // times PPA (or anyone) had changed our look values by then
-
-		std::uintptr_t MorphStepDetour(void* a_self, bool a_flag)
-		{
-			g_lateCalls.fetch_add(1, std::memory_order_relaxed);
-			if (a_self) {
-				auto* fg = *reinterpret_cast<RE::BSFaceGenAnimationData**>(reinterpret_cast<std::uint8_t*>(a_self) + kFaceNodeAnimDataOffset);
-				if (fg) {
-					for (auto& s : g_hookSlots) {
-						if (s.fg.load(std::memory_order_acquire) != fg) {
-							continue;
-						}
-						RE::BSSpinLockGuard lock(fg->lock);
-						auto&               fin = fg->modifier3;
-						const float         cur = s.blendCur.load(std::memory_order_relaxed);
-						if (cur > 0.001f && fin.values && fin.count > kLookUp) {
-							const float eased = cur * cur * (3.0f - 2.0f * cur);
-							bool        changed = false;
-							for (int i = 0; i < 4; ++i) {
-								float ours = s.w[i].load(std::memory_order_relaxed);
-								ours = ours < 0.0f ? 0.0f : (ours > 1.0f ? 1.0f : ours);
-								const float nat = fin.values[kSlots[i]];
-								float       v = nat + (ours - nat) * eased;
-								v = v < 0.0f ? 0.0f : (v > 1.0f ? 1.0f : v);
-								if (std::fabs(v - nat) > 0.03f) {
-									changed = true;
-								}
-								fin.values[kSlots[i]] = v;
-							}
-							fin.isUpdated = false;
-							if (changed) {
-								g_lateFixed.fetch_add(1, std::memory_order_relaxed);
-							}
-						}
-						break;
-					}
-				}
-			}
-			return g_origMorphStep(a_self, a_flag);
-		}
-
-		// retried from Tick until PPA has installed its hook (or we decide it is not there)
-		void TryInstallLateHook()
-		{
-			if (g_lateHooked || g_lateTries > 40) {
-				return;
-			}
-			++g_lateTries;
-			HMODULE ppa = ::GetModuleHandleA("AccuratePenetration.dll");
-			if (!ppa) {
-				if (g_lateTries == 1) {
-					logger::info("late pass: PPA (AccuratePenetration.dll) not loaded - not needed");
-				}
-				g_lateTries = 1000;  // no PPA: stop trying
-				return;
-			}
-			const auto  base = reinterpret_cast<std::uintptr_t>(ppa);
-			static const std::uint8_t kPrologue[10] = { 0x48, 0x89, 0x5C, 0x24, 0x10, 0x48, 0x89, 0x6C, 0x24, 0x18 };
-			const auto* dos = reinterpret_cast<const IMAGE_DOS_HEADER*>(base);
-			const auto* nt = reinterpret_cast<const IMAGE_NT_HEADERS64*>(base + static_cast<std::uintptr_t>(dos->e_lfanew));
-			const std::uintptr_t imgSize = nt->OptionalHeader.SizeOfImage;
-			const PpaBuild*      build = nullptr;
-			for (const auto& c : kPpaBuilds) {
-				if (c.hookFnRva + 0x100 > imgSize || c.slotRva + sizeof(std::uintptr_t) > imgSize) {
-					continue;
-				}
-				const auto* f = reinterpret_cast<const std::uint8_t*>(base + c.hookFnRva);
-				if (std::memcmp(f, kPrologue, sizeof(kPrologue)) != 0) {
-					continue;
-				}
-				if (c.checkJmp) {
-					bool ok = false;
-					for (std::size_t o = 0; o + 7 <= 0x100; ++o) {
-						if (f[o] == 0x48 && f[o + 1] == 0xFF && f[o + 2] == 0x25) {
-							std::int32_t disp = 0;
-							std::memcpy(&disp, f + o + 3, sizeof(disp));
-							if (reinterpret_cast<std::uintptr_t>(f + o + 7) + static_cast<std::intptr_t>(disp) == base + c.slotRva) {
-								ok = true;
-								break;
-							}
-						}
-					}
-					if (!ok) {
-						continue;
-					}
-				}
-				build = &c;
-				break;
-			}
-			if (!build) {
-				logger::info("late pass: not hooking PPA (the hook is only used for PPA 0.0.37; newer PPA builds, 0.0.39 included, work without it - this is intended, not a fault)");
-				g_lateTries = 1000;
-				return;
-			}
-			if (g_ppaSlotRva == 0) {
-				logger::info("late pass: recognised PPA build {} (hook function RVA {:X}, saved-callee slot RVA {:X})", build->name, build->hookFnRva, build->slotRva);
-			}
-			g_ppaSlotRva = build->slotRva;
-			const auto saved = *reinterpret_cast<const std::uintptr_t*>(base + g_ppaSlotRva);
-			const auto skyBase = REL::Module::get().base();
-			if (g_lateTries == 1 || g_lateTries == 4 || g_lateTries == 20 || g_lateTries == 40) {
-				logger::info("late pass try {}: PPA base {:X}, saved callee value {:X} (Skyrim base {:X})", g_lateTries, base, saved, skyBase);
-			}
-			if (saved == 0) {
-				return;  // PPA has not saved its original callee yet: try again later
-			}
-			const auto* b = reinterpret_cast<const std::uint8_t*>(saved);
-			logger::info("late pass: PPA forwards to {:X} (module of that address: {}); first bytes {:02X} {:02X} {:02X} {:02X} {:02X} {:02X} {:02X} {:02X}", saved,
-				saved >= skyBase && saved < skyBase + 0x6000000 ? "Skyrim" : "another plugin's trampoline", b[0], b[1], b[2], b[3], b[4], b[5], b[6], b[7]);
-			// PPA ends its replacement with `jmp [saved]`. Whatever it saved may be the engine function or another plugin's hook, so rather
-			// than patching code we put OUR function into that pointer: PPA edits the face, jumps to us, we re-apply the eyes, then we
-			// jump on to what it had saved.
-			auto* slot = reinterpret_cast<std::uintptr_t*>(base + g_ppaSlotRva);
-			DWORD oldProt = 0;
-			if (!::VirtualProtect(slot, sizeof(*slot), PAGE_READWRITE, &oldProt)) {
-				logger::error("late pass: VirtualProtect failed ({})", ::GetLastError());
-				g_lateTries = 1000;
-				return;
-			}
-			g_origMorphStep = reinterpret_cast<std::uintptr_t (*)(void*, bool)>(saved);
-			*slot = reinterpret_cast<std::uintptr_t>(&MorphStepDetour);
-			::VirtualProtect(slot, sizeof(*slot), oldProt, &oldProt);
-			g_lateHooked = true;
-			logger::info("late pass: hooked - our eye values are re-applied after PPA's face edit and before the morphs are built");
-		}
-
 		bool InstallHook()
 		{
 			const auto addr = kKeyframesUpdateId.address();
 			const auto* b = reinterpret_cast<const std::uint8_t*>(addr);
-			// (DumpCallSites used AE-only ids and is a one-off diagnostic: not run, so other game versions never look those ids up)
 			logger::info("KeyframesUpdate at {:X} (module base {:X}); first bytes {:02X} {:02X} {:02X} {:02X} {:02X} {:02X} {:02X} {:02X}", addr,
 				REL::Module::get().base(), b[0], b[1], b[2], b[3], b[4], b[5], b[6], b[7]);
 			g_origKeyframes = reinterpret_cast<bool (*)(RE::BSFaceGenAnimationData*, float, bool)>(addr);
@@ -713,11 +528,13 @@ namespace Eyes
 			const float mUpSign = c[ui].z > 0 ? 1.0f : -1.0f;
 			const float mFwdSign = best > 0 ? 1.0f : -1.0f;
 			const bool  same = (ui == g_cal.upIdx && fi == g_cal.fwdIdx && mUpSign == g_cal.upSign && mFwdSign == g_cal.fwdSign);
-			logger::info("head axes: using the standard skeleton convention (axis {} up {:+.0f}, axis {} forward {:+.0f}). Measured on {}: axis {} up ({:+.0f}), "
-						 "axis {} forward ({:+.0f}) - {} [axes in world: x({:+.2f} {:+.2f} {:+.2f}) y({:+.2f} {:+.2f} {:+.2f}) z({:+.2f} {:+.2f} {:+.2f}); body heading ({:+.2f} {:+.2f})]",
-				g_cal.upIdx, g_cal.upSign, g_cal.fwdIdx, g_cal.fwdSign, a_actor->GetName(), ui, mUpSign, fi, mFwdSign,
-				same ? "matches" : "differs (head probably pitched over at that moment); the standard convention is kept", c[0].x, c[0].y, c[0].z,
-				c[1].x, c[1].y, c[1].z, c[2].x, c[2].y, c[2].z, hx, hy);
+			if (g_cfg.diag) {
+				logger::info("head axes: using the standard skeleton convention (axis {} up {:+.0f}, axis {} forward {:+.0f}). Measured on {}: axis {} up ({:+.0f}), "
+							 "axis {} forward ({:+.0f}) - {} [axes in world: x({:+.2f} {:+.2f} {:+.2f}) y({:+.2f} {:+.2f} {:+.2f}) z({:+.2f} {:+.2f} {:+.2f}); body heading ({:+.2f} {:+.2f})]",
+					g_cal.upIdx, g_cal.upSign, g_cal.fwdIdx, g_cal.fwdSign, a_actor->GetName(), ui, mUpSign, fi, mFwdSign,
+					same ? "matches" : "differs (head probably pitched over at that moment); the standard convention is kept", c[0].x, c[0].y, c[0].z,
+					c[1].x, c[1].y, c[1].z, c[2].x, c[2].y, c[2].z, hx, hy);
+			}
 		}
 
 		float RandF(float a_lo, float a_hi)
@@ -799,7 +616,7 @@ namespace Eyes
 			a_st.fluLeft = 0.25f + 0.35f + 2.0f * g_cfg.fluBlinkTime + g_cfg.fluGap + 0.25f + 0.5f + 0.3f;
 			a_st.fluNext = -1.0f;
 				g_flutterPlays.fetch_add(1, std::memory_order_relaxed);
-				if (g_cfg.diag || kBlinkWatch) {
+				if (g_cfg.diag) {
 					logger::info("flutter on {}: style {}, wide {:.2f}, brow {:.2f}, blinks {:.2f}s gap {:.2f}s", a_actor->GetName(), g_cfg.fluStyle,
 					g_cfg.fluStrength, g_cfg.fluBrow, g_cfg.fluBlinkTime, g_cfg.fluGap);
 			}
@@ -1087,7 +904,9 @@ if (n == 0) {
 			const int  engine = ChooseGazeEngine(a_actor, a_st);
 			if (a_st.modeLogged != engine) {
 				a_st.modeLogged = engine;
-				logger::info("gaze engine for {:08X} {}: {}", a_actor->GetFormID(), a_actor->GetName(), engine > 0 ? "FaceLab (per-eye morphs)" : (engine == 0 ? "MFG" : "waiting / FaceLab only and not available"));
+				if (g_cfg.diag) {
+					logger::info("gaze engine for {:08X} {}: {}", a_actor->GetFormID(), a_actor->GetName(), engine > 0 ? "FaceLab (per-eye morphs)" : (engine == 0 ? "MFG" : "waiting / FaceLab only and not available"));
+				}
 			}
 			if (engine < 0) {
 				ClearFaceLabGaze(a_actor->GetFormID(), a_st, 0.1f);
@@ -1151,9 +970,13 @@ const float ty = Clamp((yawDeg + a_st.awayYaw) / g_cfg.maxYaw, -1.0f, 1.0f) * aw
 						&fg->customKeyFrame, &fg->expression3, &fg->modifier1, &fg->modifier3, &fg->phoneme1, &fg->phoneme3, &fg->custom1, &fg->custom3 };
 					const char* nm[12] = { "0x20", "0x40", "0x60", "0x80", "0xA0", "0xC0", "0xE0", "0x100", "0x120", "0x140", "0x160", "0x180" };
 					for (int k = 0; k < 12; ++k) {
-						logger::info("  face layer @{}: type={} count={}", nm[k], static_cast<int>(kf[k]->type), kf[k]->count);
+						if (g_cfg.diag) {
+							logger::info("  face layer @{}: type={} count={}", nm[k], static_cast<int>(kf[k]->type), kf[k]->count);
+						}
 					}
-					logger::info("  layer checks: dialogue(0xE0) usable={} final(0x100) usable={}", ok1, ok3);
+					if (g_cfg.diag) {
+						logger::info("  layer checks: dialogue(0xE0) usable={} final(0x100) usable={}", ok1, ok3);
+					}
 				}
 				for (int i = 0; i < 4; ++i) {
 					seen[i] = mk.values[kSlots[i]];
@@ -1197,8 +1020,8 @@ const float ty = Clamp((yawDeg + a_st.awayYaw) / g_cfg.maxYaw, -1.0f, 1.0f) * aw
 					a_st.lastLog = now;
 					++g_diagLines;
 					logger::info("[{}] slot={} applied={} fg={:X} away={:.2f} giveUp={:.0f} released={} | {:08X} yaw {:+.1f} pitch {:+.1f} deg | norm y {:+.2f} p {:+.2f} | wrote D{:.2f} L{:.2f} R{:.2f} U{:.2f} | "
-								 "found before write D{:.2f} L{:.2f} R{:.2f} U{:.2f} | modifiers={} writes={} overwritten-by-other={} late-pass overwritten={}/{} | "
-								 "hook={} calls={} writes={} | foreign-before-next-update={}/{} last D{:.2f}->{:.2f} L{:.2f}->{:.2f} R{:.2f}->{:.2f} U{:.2f}->{:.2f} | exprOverride={} u21A={} | late-pass calls={} fixed={} | fwd ({:+.2f} {:+.2f} {:+.2f}) frame={} | dialogue-layer D{:.2f} L{:.2f} R{:.2f} U{:.2f} | FINAL D{:.2f} L{:.2f} R{:.2f} U{:.2f}",
+								 "found before write D{:.2f} L{:.2f} R{:.2f} U{:.2f} | modifiers={} writes={} overwritten-by-other={} ui-pass overwritten={}/{} | "
+								 "hook={} calls={} writes={} | foreign-before-next-update={}/{} last D{:.2f}->{:.2f} L{:.2f}->{:.2f} R{:.2f}->{:.2f} U{:.2f}->{:.2f} | exprOverride={} u21A={} | fwd ({:+.2f} {:+.2f} {:+.2f}) frame={} | dialogue-layer D{:.2f} L{:.2f} R{:.2f} U{:.2f} | FINAL D{:.2f} L{:.2f} R{:.2f} U{:.2f}",
 						g_curScene, a_st.slot, a_st.slot >= 0 ? g_hookSlots[a_st.slot].applied.load() : 0ull, reinterpret_cast<std::uintptr_t>(fg), away, giveUp, released,
 						a_actor->GetFormID(), yawDeg, pitchDeg, a_st.yaw, a_st.pitch, want[0], want[1], want[2], want[3],
 						seen[0], seen[1], seen[2], seen[3], count, a_st.writes, a_st.foreign, a_st.uiForeign, a_st.uiPasses, g_hooked ? "ON" : "off", g_hookCalls.load(), g_hookWrites.load(),
@@ -1207,7 +1030,7 @@ const float ty = Clamp((yawDeg + a_st.awayYaw) / g_cfg.maxYaw, -1.0f, 1.0f) * aw
 						a_st.slot >= 0 ? g_hookSlots[a_st.slot].preWas[1].load() : 0.0f, a_st.slot >= 0 ? g_hookSlots[a_st.slot].preSeen[1].load() : 0.0f,
 						a_st.slot >= 0 ? g_hookSlots[a_st.slot].preWas[2].load() : 0.0f, a_st.slot >= 0 ? g_hookSlots[a_st.slot].preSeen[2].load() : 0.0f,
 						a_st.slot >= 0 ? g_hookSlots[a_st.slot].preWas[3].load() : 0.0f, a_st.slot >= 0 ? g_hookSlots[a_st.slot].preSeen[3].load() : 0.0f,
-						fg->exprOverride, fg->unk21A, g_lateCalls.load(), g_lateFixed.load(), f.x, f.y, f.z, headFrame ? "head" : "body", a_st.l1[0], a_st.l1[1], a_st.l1[2], a_st.l1[3], a_st.fin[0], a_st.fin[1], a_st.fin[2], a_st.fin[3]);
+						fg->exprOverride, fg->unk21A, f.x, f.y, f.z, headFrame ? "head" : "body", a_st.l1[0], a_st.l1[1], a_st.l1[2], a_st.l1[3], a_st.fin[0], a_st.fin[1], a_st.fin[2], a_st.fin[3]);
 				}
 			}
 		}
@@ -1351,22 +1174,15 @@ const float ty = Clamp((yawDeg + a_st.awayYaw) / g_cfg.maxYaw, -1.0f, 1.0f) * aw
 				maxUs = std::max(maxUs, us);
 				++n;
 				if (std::chrono::duration<float>(end - since).count() >= 30.0f) {
-					if (!g_state.empty() && n > 0) {
+					if (g_cfg.diag && !g_state.empty() && n > 0) {
 						logger::info("perf: Fourth Wall tick avg {:.0f} us, max {:.0f} us over {} ticks, driving {} characters; FaceLab gaze updates sent {} / skipped {}", sumUs / static_cast<double>(n), maxUs, n, g_state.size(), g_gazeSends.exchange(0), g_gazeSkips.exchange(0));
-						if (kBlinkWatch) {
+						{
 							static std::uint64_t prevEp = 0, prevFr = 0, prevFl = 0;
 							const auto           ep = g_asymEpisodes.load(), fr = g_asymFrames.load(), fl = g_flutterPlays.load();
 							logger::info("blink watch (30 s): {} one-eye-blink episodes ({} frames with one lid shut and the other not), {} flutters started", ep - prevEp, fr - prevFr, fl - prevFl);
 							prevEp = ep;
 							prevFr = fr;
 							prevFl = fl;
-						}
-						if (g_lateHooked) {  // PPA late pass: how often something (PPA's face preset) had moved our eye values by the time the morphs were built
-							static std::uint64_t prevCalls = 0, prevFixed = 0;
-							const auto           c = g_lateCalls.load(), fx = g_lateFixed.load();
-							logger::info("late pass (PPA): {} face updates went through it in 30 s; on {} of them the eye values had been changed since our write and were put back", c - prevCalls, fx - prevFixed);
-							prevCalls = c;
-							prevFixed = fx;
 						}
 					}
 					sumUs = maxUs = 0.0;
@@ -1379,6 +1195,7 @@ const float ty = Clamp((yawDeg + a_st.awayYaw) / g_cfg.maxYaw, -1.0f, 1.0f) * aw
 		void Tick()
 		{
 			TickPerf perf_;
+			g_blinkWatch.store(g_cfg.diag, std::memory_order_relaxed);
 			if (!g_running) {
 				return;
 			}
@@ -1396,7 +1213,9 @@ const float ty = Clamp((yawDeg + a_st.awayYaw) / g_cfg.maxYaw, -1.0f, 1.0f) * aw
 					std::string cur = sid ? sid : "";
 					auto        sit = g_sceneOf.find(id);
 					if (sit == g_sceneOf.end() || sit->second != cur) {
-						logger::info("scene on thread {}: '{}'{}", id, cur, sit == g_sceneOf.end() ? "" : (" (was '" + sit->second + "')"));
+						if (g_cfg.diag) {
+							logger::info("scene on thread {}: '{}'{}", id, cur, sit == g_sceneOf.end() ? "" : (" (was '" + sit->second + "')"));
+						}
 						g_sceneOf[id] = cur;
 					}
 				}
@@ -1404,9 +1223,6 @@ const float ty = Clamp((yawDeg + a_st.awayYaw) / g_cfg.maxYaw, -1.0f, 1.0f) * aw
 			if (std::chrono::duration<float>(now - g_lastFactionScan).count() >= 0.25f) {
 				g_lastFactionScan = now;
 				ScanFactions();
-				if (g_hooked && !g_lateHooked) {
-					TryInstallLateHook();
-				}
 			}
 
 			// testing aid (Calibration page): keep the engine's own eye wander out of the way while another mod (FaceLab) is being judged
@@ -1468,7 +1284,9 @@ const float ty = Clamp((yawDeg + a_st.awayYaw) / g_cfg.maxYaw, -1.0f, 1.0f) * aw
 				static bool s_pausedLogged = false;
 				if (paused != s_pausedLogged) {
 					s_pausedLogged = paused;
-					logger::info("conversation: {}", paused ? "eye contact paused (dialogue menu open)" : "over, eye contact resumes");
+					if (g_cfg.diag) {
+						logger::info("conversation: {}", paused ? "eye contact paused (dialogue menu open)" : "over, eye contact resumes");
+					}
 				}
 			}
 			if (paused) {
@@ -1487,7 +1305,9 @@ const float ty = Clamp((yawDeg + a_st.awayYaw) / g_cfg.maxYaw, -1.0f, 1.0f) * aw
 					seen[e.formID] = true;
 					auto it = g_state.find(e.formID);
 					if (it == g_state.end()) {
-						logger::info("eye contact started on {:08X} ({}, {})", e.formID, actor->GetName(), e.female ? "female" : "male");
+						if (g_cfg.diag) {
+							logger::info("eye contact started on {:08X} ({}, {})", e.formID, actor->GetName(), e.female ? "female" : "male");
+						}
 						it = g_state.emplace(e.formID, State{}).first;
 					}
 					it->second.idleSource = e.force;
@@ -1556,7 +1376,9 @@ const float ty = Clamp((yawDeg + a_st.awayYaw) / g_cfg.maxYaw, -1.0f, 1.0f) * aw
 					if (std::chrono::duration<float>(now - s_lastNearbyLog).count() >= 10.0f) {
 						s_lastNearbyLog = now;
 						if (candidates > 0) {
-							logger::info("nearby: {} candidates, {} on screen, driving {} (limit {})", candidates, cands.size(), std::min(limit, cands.size()), g_cfg.maxNearby);
+							if (g_cfg.diag) {
+								logger::info("nearby: {} candidates, {} on screen, driving {} (limit {})", candidates, cands.size(), std::min(limit, cands.size()), g_cfg.maxNearby);
+							}
 						}
 					}
 					for (std::size_t i = 0; i < cands.size() && i < limit; ++i) {
@@ -1565,7 +1387,9 @@ const float ty = Clamp((yawDeg + a_st.awayYaw) / g_cfg.maxYaw, -1.0f, 1.0f) * aw
 						seen[e.formID] = true;
 						auto it = g_state.find(e.formID);
 						if (it == g_state.end()) {
-							logger::info("eye contact started on {:08X} ({}, nearby)", e.formID, actor->GetName());
+							if (g_cfg.diag) {
+								logger::info("eye contact started on {:08X} ({}, nearby)", e.formID, actor->GetName());
+							}
 							it = g_state.emplace(e.formID, State{}).first;
 						}
 						it->second.idleSource = true;  // not in a scene: with the camera behind them their eyes stay natural
@@ -1595,7 +1419,9 @@ const float ty = Clamp((yawDeg + a_st.awayYaw) / g_cfg.maxYaw, -1.0f, 1.0f) * aw
 				}
 			}
 			for (auto id : gone) {
-				logger::info("eye contact released {:08X}", id);
+				if (g_cfg.diag) {
+					logger::info("eye contact released {:08X}", id);
+				}
 				Release(id);
 			}
 		}
@@ -1608,11 +1434,15 @@ const float ty = Clamp((yawDeg + a_st.awayYaw) / g_cfg.maxYaw, -1.0f, 1.0f) * aw
 				case OStimApi::ThreadEvent::ThreadStarted:
 					if (g_api) {
 						g_threads[a_id] = ReadActors(a_id);
-						logger::info("thread {} started with {} actor(s), scene '{}'", a_id, g_threads[a_id].size(), g_api->GetCurrentSceneID(a_id) ? g_api->GetCurrentSceneID(a_id) : "");
+						if (g_cfg.diag) {
+							logger::info("thread {} started with {} actor(s), scene '{}'", a_id, g_threads[a_id].size(), g_api->GetCurrentSceneID(a_id) ? g_api->GetCurrentSceneID(a_id) : "");
+						}
 					}
 					break;
 				case OStimApi::ThreadEvent::ThreadEnded:
-					logger::info("thread {} ended", a_id);
+					if (g_cfg.diag) {
+						logger::info("thread {} ended", a_id);
+					}
 					g_threads.erase(a_id);
 					g_sceneOf.erase(a_id);
 					break;

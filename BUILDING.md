@@ -1,4 +1,4 @@
-# The Fourth Wall - Eye Contact - source code (version 1.1.3)
+# The Fourth Wall - Eye Contact - source code (version 1.1.4)
 
 Free software under the GNU GPL v3 or later (see `LICENSE`). Copyright (C) 2026 Bolescothegoat.
 Third-party licences: `THIRD_PARTY_NOTICES.txt`.
@@ -48,4 +48,4 @@ The DLL is written to `dist/SKSE/Plugins/FourthWall.dll`.
   the MFG Fix source: <https://github.com/andrelo1/mfgfix>.
 * Values above 1.0 are invalid in the final face buffer, so everything written there is clamped to 0..1.
 * Settings are plain `key = value` lines in `Data/SKSE/Plugins/FourthWall.ini`, written by the menu.
-* Procedural Penis Animations (AccuratePenetration.dll, v0.0.37) re-sets the face after the engine's morph step in oral scenes. `Eyes.cpp` finds PPA's saved callee pointer (guarded by a prologue check and the module name) and swaps it for a function that re-applies the eye slots before calling the original target. If PPA is absent or a different version, this is skipped.
+* This plugin does not read or write any other plugin's memory. Versions before 1.1.4 had a special pass for Procedural Penis Animations 0.0.37; it was removed.
